@@ -1,0 +1,25 @@
+version = 0.1
+
+[default.deploy]
+stack_name = "posterite-mvp"
+region = "us-east-2"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"
+disable_rollback = false
+parameter_overrides = [
+  "PosteritETableName=PosteritETable",
+  "PosteritES3BucketName=posterite",
+  "SESIdentityArn=arn:aws:ses:us-east-2:181468013573:identity/posterite.run.place"
+]
+s3_prefix = "posterit-e-mvp"
+image_repositories = []
+
+[default.deploy.parameters]
+stack_name = "posterit-e-mvp"
+resolve_s3 = true
+s3_prefix = "posterit-e-mvp"
+region = "us-east-2"
+profile = "personal"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "PosteritETableName=\"PosteritETable\" PosteritES3BucketName=\"posterite\" SESIdentityArn=\"SESIdentityArn=arn:aws:ses:us-east-2:181468013573:identity/posterite.run.place\""
+image_repositories = []

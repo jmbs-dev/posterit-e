@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  posterit-e-lambdas: Backend serverless para la plataforma de legado digital Posterit-E.
+  Este template utiliza recursos de S3 y DynamoDB pre-existentes y define roles IAM granulares.
+
+Parameters:
+  PosteritETableName:
+    Type: String
+    Description: El nombre de la tabla de DynamoDB existente para los secretos.
+    Default: PosteritETable
+  PosteritES3BucketName:
+    Type: String
+    Description: El nombre del bucket de S3 existente para los secretos cifrados.
+    Default: posterite
+  SESIdentityArn:
+    Type: String
+    Description: El ARN de la identidad de SES (dominio o email) verificada para enviar correos.
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 128
+    Runtime: python3.9
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        DYNAMODB_TABLE_NAME: !Ref PosteritETableName
+        S3_BUCKET_NAME: !Ref PosteritES3BucketName
+
+Resources:
+  PosteritEApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Cors:
+        AllowMethods: "'POST, GET, OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+
+  StoreSecretLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/store_secret_lambda/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref PosteritETableName
+        - S3WritePolicy:
+            BucketName: !Ref PosteritES3BucketName
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /secrets
+            Method: post
+            RestApiId: !Ref PosteritEApi
+
+  ActivationLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/activation_lambda/
+      Handler: app.lambda_handler
+      Policies:
+        - Statement:
+            - Sid: AllowReadAndUpdateStateInDynamoDB
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PosteritETableName}
+            - Sid: AllowSendActivationEmail
+              Effect: Allow
+              Action: ses:SendEmail
+              Resource: !Ref SESIdentityArn
+            - Sid: AllowCreateEventBridgeSchedule
+              Effect: Allow
+              Action: scheduler:CreateSchedule
+              Resource: '*'
+      Events:
+        GetEvent:
+          Type: Api
+          Properties:
+            Path: /activation/{secretId}
+            Method: get
+            RestApiId: !Ref PosteritEApi
+        PostEvent:
+          Type: Api
+          Properties:
+            Path: /activation
+            Method: post
+            RestApiId: !Ref PosteritEApi
+
+  CancellationLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/cancellation_lambda/
+      Handler: app.lambda_handler
+      Policies:
+        - Statement:
+            - Sid: AllowReadAndUpdateStateForCancellation
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PosteritETableName}
+            - Sid: AllowSendCancellationEmail
+              Effect: Allow
+              Action: ses:SendEmail
+              Resource: !Ref SESIdentityArn
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /cancel
+            Method: post
+            RestApiId: !Ref PosteritEApi
+
+  ReleaseLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/release_lambda/
+      Handler: app.lambda_handler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref PosteritES3BucketName
+        - Statement:
+            - Sid: AllowManageStateAndTokensInDynamoDB
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PosteritETableName}
+            - Sid: AllowSendMfaAndReleaseEmails
+              Effect: Allow
+              Action: ses:SendEmail
+              Resource: !Ref SESIdentityArn
+      Events:
+        VerifyMfaEvent:
+          Type: Api
+          Properties:
+            Path: /mfa/verify
+            Method: post
+            RestApiId: !Ref PosteritEApi
+        GetSecretDataEvent:
+          Type: Api
+          Properties:
+            Path: /secrets/{secretId}/data
+            Method: get
+            RestApiId: !Ref PosteritEApi
+
+Outputs:
+  PosteritEApiUrl:
+    Description: "API Gateway endpoint URL for Prod stage"
+    Value: !Sub "https://${PosteritEApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"

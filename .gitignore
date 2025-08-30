@@ -1,0 +1,19 @@
+# Entornos virtuales de Python
+venv/
+.venv/
+env/
+ENV/
+*.pyc
+__pycache__/
+
+# Artefactos de AWS SAM
+.aws-sam/
+packaged.yaml
+
+# Archivos de configuración local
+.env
+.idea
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
