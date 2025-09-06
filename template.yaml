@@ -56,6 +56,8 @@ Resources:
             Path: /secrets
             Method: post
             RestApiId: !Ref PosteritEApi
+            Auth:
+              ApiKeyRequired: true
 
   ActivationLambdaFunction:
     Type: AWS::Serverless::Function
@@ -91,6 +93,8 @@ Resources:
             Path: /activation
             Method: post
             RestApiId: !Ref PosteritEApi
+            Auth:
+              ApiKeyRequired: true
 
   CancellationLambdaFunction:
     Type: AWS::Serverless::Function
@@ -116,6 +120,8 @@ Resources:
             Path: /cancel
             Method: post
             RestApiId: !Ref PosteritEApi
+            Auth:
+              ApiKeyRequired: true
 
   ReleaseLambdaFunction:
     Type: AWS::Serverless::Function
@@ -150,6 +156,34 @@ Resources:
             Path: /secrets/{secretId}/data
             Method: get
             RestApiId: !Ref PosteritEApi
+            Auth:
+              ApiKeyRequired: true
+
+  # ===============================================================
+  # API Key and Usage Plan
+  # ===============================================================
+  MyApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: PosteritE-Client-Key
+      Description: API Key for the Posterit-E client application
+      Enabled: true
+
+  MyUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: PosteritE-Usage-Plan
+      Description: Usage plan for the Posterit-E client
+      ApiStages:
+        - ApiId: !Ref PosteritEApi
+          Stage: Prod
+
+  MyUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref MyApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref MyUsagePlan
 
 Outputs:
   PosteritEApiUrl:
