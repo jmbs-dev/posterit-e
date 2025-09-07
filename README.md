@@ -3,51 +3,51 @@
 ![alt text](https://img.shields.io/badge/build-passing-brightgreen)
 ![alt text](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-Repositorio oficial para el backend serverless del proyecto Posterit-E, una plataforma de legado digital segura, privada y de código abierto.
+Official repository for the Posterit-E serverless backend, a secure, private, and open-source digital legacy platform.
 
 ---
 
-## 📜 Resumen del Proyecto
+## 📜 Project Overview
 
-Posterit-E es una plataforma diseñada para permitir a los usuarios almacenar información confidencial (como contraseñas, claves de criptomonedas, documentos o notas personales) y garantizar su entrega controlada a beneficiarios designados tras un evento que incapacite al titular, como el fallecimiento.
+Posterit-E is a platform designed to allow users to store confidential information (such as passwords, cryptocurrency keys, documents, or personal notes) and ensure its controlled delivery to designated beneficiaries after an event that incapacitates the owner, such as death.
 
-El sistema se fundamenta en un principio de confianza mínima, donde la plataforma nunca tiene acceso al contenido de los secretos del usuario.
-
----
-
-## ✨ Principios Fundamentales
-
-- 🔐 **Seguridad Zero-Knowledge (Conocimiento Cero):** El diseño criptográfico garantiza que el servidor actúa como un "custodio ciego". Todas las operaciones de cifrado y descifrado ocurren exclusivamente en el lado del cliente (en el navegador del titular y del beneficiario). El servidor solo almacena y gestiona "blobs" de datos cifrados.
-- 🛡️ **Cifrado End-to-End (E2E):** La información viaja y se almacena siempre cifrada. Solo el titular (al crear el secreto) y el beneficiario final (al recuperarlo con la contraseña correcta) pueden acceder al contenido en texto plano.
-- 🚀 **Arquitectura Serverless en AWS:** Para garantizar escalabilidad, eficiencia en costos y un enfoque en la lógica de negocio, el backend está construido 100% con servicios gestionados de AWS, principalmente AWS Lambda, API Gateway, DynamoDB y S3.
-- 🌐 **Código Abierto (Open Source):** La transparencia es clave para la confianza. Al ser de código abierto, el proyecto permite la auditoría pública e independiente de su código y protocolos de seguridad.
+The system is based on a principle of minimal trust, where the platform never has access to the content of the user's secrets.
 
 ---
 
-## 🏛️ Arquitectura del Backend
+## ✨ Core Principles
 
-Este repositorio contiene el código fuente y la configuración de infraestructura como código (IaC) para todas las funciones del backend. Utilizamos el **AWS Serverless Application Model (SAM)** para definir y desplegar los recursos.
-
-El "cerebro" de la arquitectura se encuentra en el archivo `template.yaml`, que define:
-
-- **API Gateway:** Los endpoints RESTful que exponen la funcionalidad.
-- **AWS Lambda:** Las funciones que contienen la lógica de negocio.
-- **DynamoDB:** La tabla NoSQL para almacenar metadatos y estados.
-- **S3:** El bucket para almacenar los secretos cifrados.
-- **Roles y Permisos IAM:** Las políticas que aseguran la comunicación entre servicios bajo el principio de mínimo privilegio.
+- 🔐 **Zero-Knowledge Security:** The cryptographic design ensures the server acts as a "blind custodian." All encryption and decryption operations occur exclusively on the client side (in the owner's and beneficiary's browser). The server only stores and manages encrypted data blobs.
+- 🛡️ **End-to-End Encryption (E2E):** Information is always transmitted and stored encrypted. Only the owner (when creating the secret) and the final beneficiary (when recovering it with the correct password) can access the plaintext content.
+- 🚀 **Serverless Architecture on AWS:** To ensure scalability, cost efficiency, and a focus on business logic, the backend is built 100% with managed AWS services, mainly AWS Lambda, API Gateway, DynamoDB, and S3.
+- 🌐 **Open Source:** Transparency is key to trust. As an open-source project, it allows public and independent auditing of its code and security protocols.
 
 ---
 
-## 📁 Estructura del Repositorio
+## 🏛️ Backend Architecture
 
-El proyecto sigue una estructura de monorepo, donde cada función Lambda reside en su propio directorio para aislar sus dependencias y facilitar su gestión.
+This repository contains the source code and infrastructure-as-code (IaC) configuration for all backend functions. We use the **AWS Serverless Application Model (SAM)** to define and deploy resources.
+
+The "brain" of the architecture is in the `template.yaml` file, which defines:
+
+- **API Gateway:** The RESTful endpoints that expose functionality.
+- **AWS Lambda:** The functions containing business logic.
+- **DynamoDB:** The NoSQL table for storing metadata and states.
+- **S3:** The bucket for storing encrypted secrets.
+- **IAM Roles and Permissions:** Policies that ensure communication between services under the principle of least privilege.
+
+---
+
+## 📁 Repository Structure
+
+The project follows a monorepo structure, where each Lambda function resides in its own directory to isolate dependencies and facilitate management.
 
 ```text
 posterit-e-lambdas/
 ├── functions/
 │   ├── store_secret_lambda/
-│   │   ├── app.py             # Lógica de la función
-│   │   └── requirements.txt   # Dependencias de Python
+│   │   ├── app.py             # Function logic
+│   │   └── requirements.txt   # Python dependencies
 │   ├── activation_lambda/
 │   │   ├── app.py
 │   │   └── requirements.txt
@@ -58,43 +58,43 @@ posterit-e-lambdas/
 │       ├── app.py
 │       └── requirements.txt
 │
-├── template.yaml              # Plantilla de AWS SAM (Infraestructura como Código)
-└── README.md                  # Este archivo
+├── template.yaml              # AWS SAM template (Infrastructure as Code)
+└── README.md                  # This file
 ```
 
 ---
 
-## 🚀 Empezar a Desarrollar
+## 🚀 Getting Started
 
-Sigue estos pasos para configurar tu entorno de desarrollo y desplegar el backend en tu propia cuenta de AWS.
+Follow these steps to set up your development environment and deploy the backend to your own AWS account.
 
-### Prerrequisitos
+### Prerequisites
 
-- Una cuenta de AWS.
-- Python 3.9 o superior.
-- AWS CLI configurado con tus credenciales.
-- AWS SAM CLI instalado.
+- An AWS account.
+- Python 3.9 or higher.
+- AWS CLI configured with your credentials.
+- AWS SAM CLI installed.
 
-### Construcción
+### Build
 
-El comando `sam build` compila el código fuente, descarga las dependencias de cada función Lambda y prepara los artefactos para el despliegue.
+The `sam build` command compiles the source code, downloads each Lambda function's dependencies, and prepares the artifacts for deployment.
 
 ```bash
-# Desde el directorio raíz del proyecto
+# From the project's root directory
 sam build
 ```
 
-### Despliegue
+### Deploy
 
-El comando `sam deploy --guided` empaqueta y despliega la infraestructura definida en `template.yaml`. Si es la primera vez que despliegas, o si quieres personalizar los recursos, puedes pasar los parámetros requeridos:
+The `sam deploy --guided` command packages and deploys the infrastructure defined in `template.yaml`. If this is your first deployment, or if you want to customize resources, you can pass the required parameters:
 
-Primero, exporta el ARN de tu identidad verificada en SES como una variable de entorno (esto evita exponerlo en el repositorio):
+First, export the ARN of your verified SES identity as an environment variable (this avoids exposing it in the repository):
 
 ```bash
-export SES_IDENTITY_ARN=arn:aws:ses:REGION:CUENTA:identity/tu-dominio-o-email.com
+export SES_IDENTITY_ARN=arn:aws:ses:REGION:ACCOUNT:identity/your-domain-or-email.com
 ```
 
-Luego ejecuta el despliegue usando la variable:
+Then run the deployment using the variable:
 
 ```bash
 sam deploy --guided \
@@ -104,39 +104,39 @@ sam deploy --guided \
   SESIdentityArn=$SES_IDENTITY_ARN
 ```
 
-- `PosteritETableName`: Nombre de la tabla DynamoDB para los secretos.
-- `PosteritES3BucketName`: Nombre del bucket S3 para los secretos cifrados.
-- `SESIdentityArn`: ARN de la identidad verificada en SES para envío de emails (puede ser un dominio o email).
+- `PosteritETableName`: Name of the DynamoDB table for secrets.
+- `PosteritES3BucketName`: Name of the S3 bucket for encrypted secrets.
+- `SESIdentityArn`: ARN of the verified SES identity for sending emails (can be a domain or email).
 
-Sigue las instrucciones en pantalla para completar el despliegue. Para despliegues posteriores, puedes ejecutar simplemente `sam deploy`.
-
----
-
-## 🤝 Cómo Contribuir
-
-¡Las contribuciones son bienvenidas! Si deseas mejorar Posterit-E, por favor sigue estos pasos:
-
-1. Haz un **Fork** de este repositorio.
-2. Crea una nueva rama para tu funcionalidad:
-   ```bash
-   git checkout -b feature/nueva-funcionalidad
-   ```
-3. Haz tus cambios y realiza commits atómicos.
-4. Haz un **Push** a tu rama:
-   ```bash
-   git push origin feature/nueva-funcionalidad
-   ```
-5. Abre un **Pull Request** hacia la rama `main` del repositorio original.
+Follow the on-screen instructions to complete the deployment. For subsequent deployments, you can simply run `sam deploy`.
 
 ---
 
-## 🤖 Contexto para Agentes de IA
+## 🤝 How to Contribute
 
-Este es un resumen estructurado para que los agentes de IA y los LLMs comprendan el proyecto rápidamente.
+Contributions are welcome! If you want to improve Posterit-E, please follow these steps:
 
-- **Objetivo Principal:** Implementar el backend de un sistema de legado digital (Posterit-E) utilizando una arquitectura serverless en AWS.
-- **Pilar Arquitectónico:** El sistema es Zero-Knowledge. El código del servidor NUNCA debe tener acceso a contraseñas en texto plano o a los secretos del usuario. La criptografía se maneja 100% en el cliente.
-- **Regla de Seguridad No Negociable:** Las funciones Lambda solo deben recibir y almacenar datos ya cifrados desde el cliente. Su responsabilidad es gestionar metadatos, flujos de estado y la orquestación del proceso de liberación, pero nunca descifrar información.
-- **Stack Tecnológico:** Python, AWS Lambda, API Gateway, DynamoDB, S3.
-- **Framework de IaC:** AWS SAM. El archivo `template.yaml` es la única fuente de verdad para la infraestructura de AWS.
-- **Tarea Común:** Una tarea típica sería añadir o modificar la lógica de una de las funciones Lambda en `functions/` y actualizar su definición de recursos y permisos en `template.yaml`.
+1. **Fork** this repository.
+2. Create a new branch for your feature:
+   ```bash
+   git checkout -b feature/new-feature
+   ```
+3. Make your changes and commit atomically.
+4. **Push** to your branch:
+   ```bash
+   git push origin feature/new-feature
+   ```
+5. Open a **Pull Request** to the `main` branch of the original repository.
+
+---
+
+## 🤖 Context for AI Agents
+
+This is a structured summary for AI agents and LLMs to quickly understand the project.
+
+- **Main Objective:** Implement the backend of a digital legacy system (Posterit-E) using a serverless architecture on AWS.
+- **Architectural Pillar:** The system is Zero-Knowledge. The server code MUST NEVER have access to plaintext passwords or user secrets. Cryptography is handled 100% on the client.
+- **Non-Negotiable Security Rule:** Lambda functions should only receive and store data already encrypted from the client. Their responsibility is to manage metadata, state flows, and orchestrate the release process, but never to decrypt information.
+- **Tech Stack:** Python, AWS Lambda, API Gateway, DynamoDB, S3.
+- **IaC Framework:** AWS SAM. The `template.yaml` file is the single source of truth for AWS infrastructure.
+- **Common Task:** A typical task would be to add or modify the logic of one of the Lambda functions in `functions/` and update its resource and permission definition in `template.yaml`.

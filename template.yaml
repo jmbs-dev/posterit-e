@@ -1,21 +1,21 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  posterit-e-lambdas: Backend serverless para la plataforma de legado digital Posterit-E.
-  Este template utiliza recursos de S3 y DynamoDB pre-existentes y define roles IAM granulares.
+  posterit-e-lambdas: Serverless backend for the Posterit-E digital legacy platform.
+  This template uses pre-existing S3 and DynamoDB resources and defines granular IAM roles.
 
 Parameters:
   PosteritETableName:
     Type: String
-    Description: El nombre de la tabla de DynamoDB existente para los secretos.
+    Description: The name of the existing DynamoDB table for secrets.
     Default: PosteritETable
   PosteritES3BucketName:
     Type: String
-    Description: El nombre del bucket de S3 existente para los secretos cifrados.
+    Description: The name of the existing S3 bucket for encrypted secrets.
     Default: posterite
   SESIdentityArn:
     Type: String
-    Description: El ARN de la identidad de SES (dominio o email) verificada para enviar correos.
+    Description: The ARN of the verified SES identity (domain or email) for sending emails.
 
 Globals:
   Function:
@@ -68,7 +68,7 @@ Resources:
         Variables:
           DYNAMODB_TABLE_NAME: !Ref PosteritETableName
           S3_BUCKET_NAME: !Ref PosteritES3BucketName
-          SENDER_EMAIL_ADDRESS: "no-reply@tudominio.com"  # Cambia por tu email verificado en SES
+          SENDER_EMAIL_ADDRESS: "noreply@POSTERITE.RUN.PLACE"
           RELEASE_LAMBDA_ARN: !GetAtt ReleaseLambdaFunction.Arn
           SCHEDULER_ROLE_ARN: !GetAtt SchedulerToLambdaRole.Arn
       Policies:
@@ -179,9 +179,6 @@ Resources:
     Properties:
       UsagePlanName: PosteritE-Usage-Plan
       Description: Usage plan for the Posterit-E client
-      ApiStages:
-        - ApiId: !Ref PosteritEApi
-          Stage: Prod
 
   MyUsagePlanKey:
     Type: AWS::ApiGateway::UsagePlanKey
