@@ -64,6 +64,13 @@ Resources:
     Properties:
       CodeUri: functions/activation_lambda/
       Handler: app.lambda_handler
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref PosteritETableName
+          S3_BUCKET_NAME: !Ref PosteritES3BucketName
+          SENDER_EMAIL_ADDRESS: "no-reply@tudominio.com"  # Cambia por tu email verificado en SES
+          RELEASE_LAMBDA_ARN: !GetAtt ReleaseLambdaFunction.Arn
+          SCHEDULER_ROLE_ARN: !GetAtt SchedulerToLambdaRole.Arn
       Policies:
         - Statement:
             - Sid: AllowReadAndUpdateStateInDynamoDB
@@ -80,6 +87,10 @@ Resources:
               Effect: Allow
               Action: scheduler:CreateSchedule
               Resource: '*'
+            - Sid: AllowPassSchedulerRole
+              Effect: Allow
+              Action: iam:PassRole
+              Resource: !GetAtt SchedulerToLambdaRole.Arn
       Events:
         GetEvent:
           Type: Api
@@ -178,6 +189,27 @@ Resources:
       KeyId: !Ref MyApiKey
       KeyType: API_KEY
       UsagePlanId: !Ref MyUsagePlan
+
+  SchedulerToLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: posterit-e-scheduler-to-lambda
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowInvokeReleaseLambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt ReleaseLambdaFunction.Arn
 
 Outputs:
   PosteritEApiUrl:

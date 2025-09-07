@@ -3,10 +3,12 @@ import json
 import boto3
 import hmac
 import uuid
+import datetime
 from botocore.exceptions import ClientError
 
 dynamodb = boto3.resource('dynamodb')
 CONFIG_SK = "CONFIG"
+scheduler_client = boto3.client('scheduler')
 
 def _get_secret_config(table_name, secret_id, projection=None):
     """Fetch the CONFIG item for a given secretId from DynamoDB, with optional projection."""
@@ -96,6 +98,35 @@ def get_salt_for_secret(event, table_name):
         return _unauthorized()
     return _format_response(200, {"saltCr": item["saltCr"]})
 
+def _schedule_secret_release(secret_id, grace_period_seconds):
+    """Helper to schedule the release of the secret using EventBridge Scheduler."""
+    if not isinstance(grace_period_seconds, int):
+        try:
+            grace_period_seconds = int(grace_period_seconds)
+        except Exception:
+            raise ValueError("El atributo gracePeriodSeconds es inválido o no está presente.")
+    now = datetime.datetime.utcnow()
+    release_time = now + datetime.timedelta(seconds=grace_period_seconds)
+    schedule_expression = f"at({release_time.strftime('%Y-%m-%dT%H:%M:%S')})"
+    release_lambda_arn = os.environ["RELEASE_LAMBDA_ARN"]
+    scheduler_role_arn = os.environ["SCHEDULER_ROLE_ARN"]
+    schedule_name = f"posterit-e-release-{secret_id}"
+    try:
+        scheduler_client.create_schedule(
+            Name=schedule_name,
+            ScheduleExpression=schedule_expression,
+            ActionAfterCompletion='DELETE',
+            Target={
+                "Arn": release_lambda_arn,
+                "RoleArn": scheduler_role_arn,
+                "Input": json.dumps({"secretId": secret_id})
+            },
+            FlexibleTimeWindow={"Mode": "OFF"}
+        )
+    except ClientError as e:
+        print(f"ERROR: Fallo al programar la liberación del secreto: {e}")
+        raise
+
 def verify_and_activate_process(event, table_name):
     """Handles the POST /activation use case: verifies the hash and activates the recovery process."""
     try:
@@ -108,7 +139,7 @@ def verify_and_activate_process(event, table_name):
     if not secret_id or not client_hash:
         return _bad_request("Missing secretId or clientHash in request body.")
 
-    item = _get_secret_config(table_name, secret_id, projection="passwordHashCr,processStatus,titularAlertContact")
+    item = _get_secret_config(table_name, secret_id, projection="passwordHashCr,processStatus,titularAlertContact,gracePeriodSeconds")
     if not item or not item.get("passwordHashCr"):
         return _unauthorized()
     if item.get("processStatus") != "INITIAL":
@@ -129,7 +160,14 @@ def verify_and_activate_process(event, table_name):
     else:
         print(f"WARNING: No se encontró el email del titular para el secreto {secret_id}.")
 
-    print(f"INFO: Proceso de activación iniciado para el secreto {secret_id}. Notificando al titular.")
+    # --- Programar liberación con EventBridge Scheduler ---
+    grace_period = item.get("gracePeriodSeconds")
+    try:
+        _schedule_secret_release(secret_id, grace_period)
+    except Exception as e:
+        return _internal_error("No se pudo programar la liberación del secreto.")
+
+    print(f"INFO: Proceso de activación iniciado para el secreto {secret_id}. Notificando al titular y programando liberación.")
     return _format_response(200, {"message": "Proceso de activación iniciado. El Titular ha sido notificado y el período de gracia ha comenzado."})
 
 def lambda_handler(event, context):
