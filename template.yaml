@@ -93,8 +93,6 @@ Resources:
             Path: /activation
             Method: post
             RestApiId: !Ref PosteritEApi
-            Auth:
-              ApiKeyRequired: true
 
   CancellationLambdaFunction:
     Type: AWS::Serverless::Function
@@ -120,8 +118,6 @@ Resources:
             Path: /cancel
             Method: post
             RestApiId: !Ref PosteritEApi
-            Auth:
-              ApiKeyRequired: true
 
   ReleaseLambdaFunction:
     Type: AWS::Serverless::Function
@@ -156,8 +152,6 @@ Resources:
             Path: /secrets/{secretId}/data
             Method: get
             RestApiId: !Ref PosteritEApi
-            Auth:
-              ApiKeyRequired: true
 
   # ===============================================================
   # API Key and Usage Plan
