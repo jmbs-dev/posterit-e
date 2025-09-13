@@ -71,7 +71,10 @@ def _update_process_status_and_token(table_name, secret_id, cancellation_token):
 # TODO: Implement a scheduler to send emails/SMS every N configurable time interval.
 def _send_activation_email(to_address, cancellation_token):
     ses_client = boto3.client('ses')
-    sender = os.environ["SENDER_EMAIL_ADDRESS"]
+    sender = os.getenv("SENDER_EMAIL_ADDRESS")
+    if not sender:
+        print("WARNING: SENDER_EMAIL_ADDRESS not configured; skipping email send")
+        return
     subject = "Security Alert: A recovery process for your secret has been started in Posterit-E"
     cancel_url = f"https://posterite.run.place/cancel?token={cancellation_token}"
     body = (
@@ -192,14 +195,17 @@ def verify_and_activate_process(event, table_name):
     return _format_response(200, {"message": "Activation process started. The Owner has been notified and the grace period has begun."})
 
 def lambda_handler(event, context):
-    table_name = os.environ["DYNAMODB_TABLE_NAME"]
-    http_method = event.get("httpMethod", "GET")
-
-    print(f"INFO: Lambda triggered with httpMethod={http_method}")
-    if http_method == "GET":
-        return get_salt_for_secret(event, table_name)
-    elif http_method == "POST":
-        return verify_and_activate_process(event, table_name)
-    else:
-        print(f"WARNING: Method {http_method} not allowed.")
-        return _method_not_allowed()
+    try:
+        table_name = os.environ["DYNAMODB_TABLE_NAME"]
+        http_method = event.get("httpMethod", "GET")
+        print(f"INFO: Lambda triggered with httpMethod={http_method}")
+        if http_method == "GET":
+            return get_salt_for_secret(event, table_name)
+        elif http_method == "POST":
+            return verify_and_activate_process(event, table_name)
+        else:
+            print(f"WARNING: Method {http_method} not allowed.")
+            return _method_not_allowed()
+    except Exception as e:
+        print(f"ERROR: Unhandled exception in lambda_handler: {e}")
+        return _internal_error("Internal Server Error.")
