@@ -4,7 +4,11 @@ import boto3
 import hmac
 import uuid
 import datetime
+import logging
 from botocore.exceptions import ClientError
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 dynamodb = boto3.resource('dynamodb')
 CONFIG_SK = "CONFIG"
@@ -19,15 +23,20 @@ def _get_secret_config(table_name, secret_id, projection=None):
         if projection:
             kwargs["ProjectionExpression"] = projection
         response = table.get_item(**kwargs)
-        print(f"INFO: DynamoDB get_item for secretId projection={projection} result_found={bool(response.get('Item'))}")
+        logger.info(f"DynamoDB get_item for secretId projection={projection} result_found={bool(response.get('Item'))}")
     except ClientError as e:
-        print(f"ERROR: DynamoDB error on get_item: {e}")
+        logger.error(f"DynamoDB error on get_item: {e}")
         raise Exception(f"DynamoDB error: {e}")
     return response.get("Item")
 
 def _format_response(status_code, body_dict):
     return {
         "statusCode": status_code,
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+            "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+        },
         "body": json.dumps(body_dict),
     }
 
@@ -59,12 +68,12 @@ def _update_process_status_and_token(table_name, secret_id, cancellation_token):
                 ":token": cancellation_token
             }
         )
-        print(f"INFO: Updated processStatus to ACTIVATION_PENDING and set cancellation_token for secretId")
+        logger.info(f"Updated processStatus to ACTIVATION_PENDING for secretId {secret_id}")
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            print(f"WARNING: ConditionalCheckFailedException on update_item for secretId")
+            logger.warning(f"ConditionalCheckFailedException on update_item for secretId {secret_id}")
             return False
-        print(f"ERROR: DynamoDB error on update_item: {e}")
+        logger.error(f"DynamoDB error on update_item: {e}")
         raise
     return True
 
@@ -73,7 +82,7 @@ def _send_activation_email(to_address, cancellation_token):
     ses_client = boto3.client('ses')
     sender = os.getenv("SENDER_EMAIL_ADDRESS")
     if not sender:
-        print("WARNING: SENDER_EMAIL_ADDRESS not configured; skipping email send")
+        logger.warning("SENDER_EMAIL_ADDRESS not configured; skipping email send")
         return
     subject = "Security Alert: A recovery process for your secret has been started in Posterit-E"
     cancel_url = f"https://posterite.run.place/cancel?token={cancellation_token}"
@@ -93,32 +102,31 @@ def _send_activation_email(to_address, cancellation_token):
                 "Body": {"Text": {"Data": body, "Charset": "UTF-8"}}
             }
         )
-        print(f"INFO: Activation email sent to owner for cancellation_token")
+        logger.info(f"Activation email sent to owner for secretId (token hidden)")
     except ClientError as e:
-        print(f"ERROR: Failed to send activation email to owner: {e}")
+        logger.error(f"Failed to send activation email to owner: {e}")
 
 def get_salt_for_secret(event, table_name):
     """Handles the GET /activation/{secretId} use case: returns the saltCr for the given secretId."""
     secret_id = event.get("pathParameters", {}).get("secretId")
-    print(f"INFO: GET /activation/{{secretId}} called")
+    logger.info("GET /activation/{secretId} called")
     if not secret_id:
-        print("WARNING: Missing secretId in pathParameters.")
+        logger.warning("Missing secretId in pathParameters.")
         return _bad_request("Missing secretId in path.")
     item = _get_secret_config(table_name, secret_id, projection="saltCr")
     if not item or not item.get("saltCr"):
-        print(f"WARNING: saltCr not found for secretId")
+        logger.warning(f"saltCr not found for secretId {secret_id}")
         return _unauthorized()
-    print(f"INFO: saltCr found for secretId")
+    logger.info(f"saltCr found for secretId {secret_id}")
     return _format_response(200, {"saltCr": item["saltCr"]})
 
 def _schedule_secret_release(secret_id, grace_period_seconds):
-    """Helper to schedule the release of the secret using EventBridge Scheduler."""
-    print(f"INFO: Scheduling secret release for secretId with grace_period_seconds={grace_period_seconds}")
+    logger.info(f"Scheduling secret release for secretId {secret_id} with grace_period_seconds={grace_period_seconds}")
     if not isinstance(grace_period_seconds, int):
         try:
             grace_period_seconds = int(grace_period_seconds)
         except Exception:
-            print(f"ERROR: gracePeriodSeconds invalid for secretId: {grace_period_seconds}")
+            logger.error(f"gracePeriodSeconds invalid for secretId {secret_id}: {grace_period_seconds}")
             raise ValueError("The gracePeriodSeconds attribute is invalid or not present.")
     now = datetime.datetime.utcnow()
     release_time = now + datetime.timedelta(seconds=grace_period_seconds)
@@ -138,74 +146,71 @@ def _schedule_secret_release(secret_id, grace_period_seconds):
             },
             FlexibleTimeWindow={"Mode": "OFF"}
         )
-        print(f"INFO: EventBridge Scheduler create_schedule success for secretId at {schedule_expression}")
+        logger.info(f"EventBridge Scheduler create_schedule success for secretId {secret_id} at {schedule_expression}")
     except ClientError as e:
-        print(f"ERROR: Failed to schedule secret release: {e}")
+        logger.error(f"Failed to schedule secret release for secretId {secret_id}: {e}")
         raise
 
 def verify_and_activate_process(event, table_name):
-    """Handles the POST /activation use case: verifies the hash and activates the recovery process."""
-    print("INFO: POST /activation called.")
+    logger.info("POST /activation called.")
     try:
         body = json.loads(event.get("body", "{}"))
     except Exception:
-        print("ERROR: Invalid JSON body in POST /activation.")
+        logger.error("Invalid JSON body in POST /activation.")
         return _bad_request("Invalid JSON body.")
 
     secret_id = body.get("secretId")
     client_hash = body.get("clientHash")
     if not secret_id or not client_hash:
-        print("WARNING: Missing secretId or clientHash in request body.")
+        logger.warning("Missing secretId or clientHash in request body.")
         return _bad_request("Missing secretId or clientHash in request body.")
 
     item = _get_secret_config(table_name, secret_id, projection="passwordHashCr,processStatus,titularAlertContact,gracePeriodSeconds")
     if not item or not item.get("passwordHashCr"):
-        print(f"WARNING: passwordHashCr not found for secretId")
+        logger.warning(f"passwordHashCr not found for secretId {secret_id}")
         return _unauthorized()
     if item.get("processStatus") != "INITIAL":
-        print(f"WARNING: processStatus is not INITIAL for secretId")
+        logger.warning(f"processStatus is not INITIAL for secretId {secret_id}")
         return _conflict()
 
     stored_hash = item["passwordHashCr"]
     if not hmac.compare_digest(str(client_hash), str(stored_hash)):
-        print(f"WARNING: Hash mismatch for secretId")
+        logger.warning(f"Hash mismatch for secretId {secret_id}")
         return _unauthorized()
 
-    # Token required so the owner can cancel the process
     cancellation_token = str(uuid.uuid4())
     if not _update_process_status_and_token(table_name, secret_id, cancellation_token):
-        print(f"WARNING: Could not update process status for secretId")
+        logger.warning(f"Could not update process status for secretId {secret_id}")
         return _conflict()
 
     titular_email = item.get("titularAlertContact")
     if titular_email:
         _send_activation_email(titular_email, cancellation_token)
     else:
-        print(f"WARNING: Owner email not found for the secret.")
+        logger.warning(f"Owner email not found for the secretId {secret_id}.")
 
-    # --- Schedule release with EventBridge Scheduler ---
     grace_period = item.get("gracePeriodSeconds")
     try:
         _schedule_secret_release(secret_id, grace_period)
     except Exception as e:
-        print(f"ERROR: Could not schedule secret release: {e}")
+        logger.error(f"Could not schedule secret release for secretId {secret_id}: {e}")
         return _internal_error("Could not schedule secret release.")
 
-    print(f"INFO: Activation process started for the secret. Owner notified and release scheduled.")
+    logger.info(f"Activation process started for secretId {secret_id}. Owner notified and release scheduled.")
     return _format_response(200, {"message": "Activation process started. The Owner has been notified and the grace period has begun."})
 
 def lambda_handler(event, context):
     try:
         table_name = os.environ["DYNAMODB_TABLE_NAME"]
         http_method = event.get("httpMethod", "GET")
-        print(f"INFO: Lambda triggered with httpMethod={http_method}")
+        logger.info(f"Lambda triggered with httpMethod={http_method}")
         if http_method == "GET":
             return get_salt_for_secret(event, table_name)
         elif http_method == "POST":
             return verify_and_activate_process(event, table_name)
         else:
-            print(f"WARNING: Method {http_method} not allowed.")
+            logger.warning(f"Method {http_method} not allowed.")
             return _method_not_allowed()
     except Exception as e:
-        print(f"ERROR: Unhandled exception in lambda_handler: {e}")
+        logger.error(f"Unhandled exception in lambda_handler: {e}")
         return _internal_error("Internal Server Error.")

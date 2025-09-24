@@ -1,6 +1,8 @@
 import base64
 import json
+import logging
 import os
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -10,7 +12,7 @@ from botocore.exceptions import ClientError
 
 REQUIRED_FIELDS = [
     'encryptedSecret', 'encryptedDek', 'saltKek', 'saltCr',
-    'passwordHashCr', 'beneficiaryContact', 'gracePeriodSeconds'
+    'passwordHashCr', 'beneficiaryContact', 'gracePeriodSeconds', 'titularAlertContact'
 ]
 CONFIG_SK = "CONFIG"
 ENCRYPTED_PAYLOAD_SK = "ENCRYPTED_PAYLOAD"
@@ -18,13 +20,26 @@ ENCRYPTED_PAYLOAD_SK = "ENCRYPTED_PAYLOAD"
 s3_client = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
 
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+if not logger.hasHandlers():
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
 class ValidationException(ValueError):
     """Custom exception for request validation errors."""
     pass
 
 def _parse_and_validate_body(event):
     """Parses and validates the incoming request body."""
-    body = json.loads(event.get('body', '{}'))
+    raw_body = event.get('body')
+    if raw_body is None:
+        raw_body = '{}'
+    body = json.loads(raw_body)
     if not body:
         raise ValidationException("Request body cannot be empty.")
     for field in REQUIRED_FIELDS:
@@ -58,26 +73,34 @@ def lambda_handler(event, context):
         and its corresponding salt (`saltKek`).
     """
     try:
+        logger.info("Request received for storing secret.")
         table_name = os.environ['DYNAMODB_TABLE_NAME']
         bucket_name = os.environ['S3_BUCKET_NAME']
+        logger.info(f"Using DynamoDB table: {table_name} and S3 bucket: {bucket_name}")
         body = _parse_and_validate_body(event)
+        logger.info("Request body validated. Required fields present.")
         metadata = _generate_server_side_metadata(body['gracePeriodSeconds'])
+        logger.info(f"Generated metadata for secretId: {metadata['secret_id']}")
         _upload_secret_to_s3(bucket_name, metadata['s3_object_key'], body['encryptedSecret'])
+        logger.info(f"Encrypted secret uploaded to S3 with key: {metadata['s3_object_key']}")
         config_item, payload_item = _prepare_dynamodb_items(body, metadata)
+        logger.info(f"Prepared DynamoDB items for secretId: {metadata['secret_id']}")
         dynamodb.meta.client.transact_write_items(
             TransactItems=[
                 {'Put': {'TableName': table_name, 'Item': config_item}},
                 {'Put': {'TableName': table_name, 'Item': payload_item}}
             ]
         )
+        logger.info(f"DynamoDB transaction completed for secretId: {metadata['secret_id']}")
         return _format_response(201, {'message': 'Secret stored successfully.', 'secretId': metadata['secret_id']})
     except ValidationException as e:
+        logger.warning(f"Validation error: {str(e)}")
         return _format_response(400, {'error': 'Invalid Request', 'details': str(e)})
     except ClientError as e:
-        print(f"AWS ClientError ({e.response['Error'].get('Code')}): {e}")
+        logger.error(f"AWS ClientError ({e.response['Error'].get('Code')}): {e}")
         return _format_response(500, {'error': 'Server Error', 'details': 'A service communication error occurred.'})
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        logger.error(f"Unexpected error: {e}")
         return _format_response(500, {'error': 'Internal Server Error', 'details': 'An unexpected error occurred.'})
 
 def _generate_server_side_metadata(grace_period_seconds):
@@ -108,7 +131,7 @@ def _prepare_dynamodb_items(body, metadata):
         'SK': CONFIG_SK,
         'secretId': metadata['secret_id'],
         'beneficiaryMfaContact': body['beneficiaryContact'],
-        'titularAlertContact': body.get('titularAlertContact', ''),
+        'titularAlertContact': body['titularAlertContact'],
         'processStatus': 'INITIAL',
         'gracePeriodSeconds': int(body['gracePeriodSeconds']),
         'gracePeriodExpiresAt': metadata['grace_period_expires_at'],
@@ -128,5 +151,12 @@ def _prepare_dynamodb_items(body, metadata):
     return config_item, encrypted_payload_item
 
 def _format_response(status_code, body):
-    """Formats a standard HTTP JSON response."""
-    return {'statusCode': status_code, 'body': json.dumps(body)}
+    return {
+        'statusCode': status_code,
+        'headers': {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+            'Access-Control-Allow-Methods': 'POST,OPTIONS'
+        },
+        'body': json.dumps(body)
+    }

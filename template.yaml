@@ -30,6 +30,11 @@ Globals:
         S3_BUCKET_NAME: !Ref PosteritES3BucketName
 
 Resources:
+  ApiGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/api-gateway/posterit-e-mvp-api
+
   PosteritEApi:
     Type: AWS::Serverless::Api
     Properties:
@@ -38,6 +43,15 @@ Resources:
         AllowMethods: "'POST, GET, OPTIONS'"
         AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
         AllowOrigin: "'*'"
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","caller":"$context.identity.caller","user":"$context.identity.user","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength"}'
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
 
   StoreSecretLambdaFunction:
     Type: AWS::Serverless::Function
@@ -66,8 +80,6 @@ Resources:
       Handler: app.lambda_handler
       Environment:
         Variables:
-          DYNAMODB_TABLE_NAME: !Ref PosteritETableName
-          S3_BUCKET_NAME: !Ref PosteritES3BucketName
           SENDER_EMAIL_ADDRESS: "noreply@POSTERITE.RUN.PLACE"
           RELEASE_LAMBDA_ARN: !GetAtt ReleaseLambdaFunction.Arn
           SCHEDULER_ROLE_ARN: !GetAtt SchedulerToLambdaRole.Arn
@@ -164,33 +176,9 @@ Resources:
             Method: get
             RestApiId: !Ref PosteritEApi
 
-  # ===============================================================
-  # API Key and Usage Plan
-  # ===============================================================
-  MyApiKey:
-    Type: AWS::ApiGateway::ApiKey
-    Properties:
-      Name: PosteritE-Client-Key
-      Description: API Key for the Posterit-E client application
-      Enabled: true
-
-  MyUsagePlan:
-    Type: AWS::ApiGateway::UsagePlan
-    Properties:
-      UsagePlanName: PosteritE-Usage-Plan
-      Description: Usage plan for the Posterit-E client
-
-  MyUsagePlanKey:
-    Type: AWS::ApiGateway::UsagePlanKey
-    Properties:
-      KeyId: !Ref MyApiKey
-      KeyType: API_KEY
-      UsagePlanId: !Ref MyUsagePlan
-
   SchedulerToLambdaRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: posterit-e-scheduler-to-lambda
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -212,3 +200,6 @@ Outputs:
   PosteritEApiUrl:
     Description: "API Gateway endpoint URL for Prod stage"
     Value: !Sub "https://${PosteritEApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  PosteritEApiId:
+    Description: "API Gateway REST API ID"
+    Value: !Ref PosteritEApi
