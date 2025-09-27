@@ -14,6 +14,22 @@ dynamodb = boto3.resource('dynamodb')
 CONFIG_SK = "CONFIG"
 scheduler_client = boto3.client('scheduler')
 
+def lambda_handler(event, context):
+    try:
+        table_name = os.environ["DYNAMODB_TABLE_NAME"]
+        http_method = event.get("httpMethod", "GET")
+        logger.info(f"Lambda triggered with httpMethod={http_method}")
+        if http_method == "GET":
+            return get_salt_for_secret(event, table_name)
+        elif http_method == "POST":
+            return verify_and_activate_process(event, table_name)
+        else:
+            logger.warning(f"Method {http_method} not allowed.")
+            return _method_not_allowed()
+    except Exception as e:
+        logger.error(f"Unhandled exception in lambda_handler: {e}")
+        return _internal_error("Internal Server Error.")
+
 def _get_secret_config(table_name, secret_id, projection=None):
     """Fetch the CONFIG item for a given secretId from DynamoDB, with optional projection."""
     table = dynamodb.Table(table_name)
@@ -198,19 +214,3 @@ def verify_and_activate_process(event, table_name):
 
     logger.info(f"Activation process started for secretId {secret_id}. Owner notified and release scheduled.")
     return _format_response(200, {"message": "Activation process started. The Owner has been notified and the grace period has begun."})
-
-def lambda_handler(event, context):
-    try:
-        table_name = os.environ["DYNAMODB_TABLE_NAME"]
-        http_method = event.get("httpMethod", "GET")
-        logger.info(f"Lambda triggered with httpMethod={http_method}")
-        if http_method == "GET":
-            return get_salt_for_secret(event, table_name)
-        elif http_method == "POST":
-            return verify_and_activate_process(event, table_name)
-        else:
-            logger.warning(f"Method {http_method} not allowed.")
-            return _method_not_allowed()
-    except Exception as e:
-        logger.error(f"Unhandled exception in lambda_handler: {e}")
-        return _internal_error("Internal Server Error.")

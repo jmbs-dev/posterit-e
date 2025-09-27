@@ -34,19 +34,6 @@ class ValidationException(ValueError):
     """Custom exception for request validation errors."""
     pass
 
-def _parse_and_validate_body(event):
-    """Parses and validates the incoming request body."""
-    raw_body = event.get('body')
-    if raw_body is None:
-        raw_body = '{}'
-    body = json.loads(raw_body)
-    if not body:
-        raise ValidationException("Request body cannot be empty.")
-    for field in REQUIRED_FIELDS:
-        if field not in body:
-            raise ValidationException(f"Required field '{field}' is missing.")
-    return body
-
 def lambda_handler(event, context):
     """
         AWS Lambda Function: storeSecretLambda
@@ -102,6 +89,19 @@ def lambda_handler(event, context):
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         return _format_response(500, {'error': 'Internal Server Error', 'details': 'An unexpected error occurred.'})
+
+def _parse_and_validate_body(event):
+    """Parses and validates the incoming request body."""
+    raw_body = event.get('body')
+    if raw_body is None:
+        raw_body = '{}'
+    body = json.loads(raw_body)
+    if not body:
+        raise ValidationException("Request body cannot be empty.")
+    for field in REQUIRED_FIELDS:
+        if field not in body:
+            raise ValidationException(f"Required field '{field}' is missing.")
+    return body
 
 def _generate_server_side_metadata(grace_period_seconds):
     """Generates server-side metadata like unique IDs and timestamps."""

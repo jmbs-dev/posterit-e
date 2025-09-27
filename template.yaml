@@ -147,6 +147,12 @@ Resources:
     Properties:
       CodeUri: functions/release_lambda/
       Handler: app.lambda_handler
+      Environment:
+        Variables:
+          BASE_URL: "https://posterite.app"
+          SENDER_EMAIL_ADDRESS: "noreply@POSTERITE.RUN.PLACE"
+          TOKEN_TTL_SECONDS: "300"
+          OTP_TTL_SECONDS: "600"
       Policies:
         - S3ReadPolicy:
             BucketName: !Ref PosteritES3BucketName
