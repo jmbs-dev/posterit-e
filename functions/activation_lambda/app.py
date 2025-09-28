@@ -7,14 +7,20 @@ import datetime
 import logging
 from botocore.exceptions import ClientError
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource('dynamodb')
 CONFIG_SK = "CONFIG"
 scheduler_client = boto3.client('scheduler')
 
 def lambda_handler(event, context):
+    """
+    Main entry point for the activation_lambda AWS Lambda function.
+    - Routes requests based on HTTP method: GET for salt retrieval, POST for process activation.
+    - Logs request details for traceability.
+    - Handles errors and returns appropriate HTTP responses.
+    """
     try:
         table_name = os.environ["DYNAMODB_TABLE_NAME"]
         http_method = event.get("httpMethod", "GET")
@@ -101,7 +107,8 @@ def _send_activation_email(to_address, cancellation_token):
         logger.warning("SENDER_EMAIL_ADDRESS not configured; skipping email send")
         return
     subject = "Security Alert: A recovery process for your secret has been started in Posterit-E"
-    cancel_url = f"https://posterite.run.place/cancel?token={cancellation_token}"
+    base_url = os.environ.get("BASE_URL", "https://posterite.app")
+    cancel_url = f"{base_url}/cancel?token={cancellation_token}"
     body = (
         f"Hello,\n\nA recovery process for your secret in Posterit-E has been started. "
         f"If you did NOT authorize this process, you can cancel it immediately using the following secure link:\n\n"

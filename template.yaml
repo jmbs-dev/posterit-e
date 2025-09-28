@@ -2,20 +2,6 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   posterit-e-lambdas: Serverless backend for the Posterit-E digital legacy platform.
-  This template uses pre-existing S3 and DynamoDB resources and defines granular IAM roles.
-
-Parameters:
-  PosteritETableName:
-    Type: String
-    Description: The name of the existing DynamoDB table for secrets.
-    Default: PosteritETable
-  PosteritES3BucketName:
-    Type: String
-    Description: The name of the existing S3 bucket for encrypted secrets.
-    Default: posterite
-  SESIdentityArn:
-    Type: String
-    Description: The ARN of the verified SES identity (domain or email) for sending emails.
 
 Globals:
   Function:
@@ -26,8 +12,14 @@ Globals:
       - x86_64
     Environment:
       Variables:
-        DYNAMODB_TABLE_NAME: !Ref PosteritETableName
-        S3_BUCKET_NAME: !Ref PosteritES3BucketName
+        DYNAMODB_TABLE_NAME: "{{resolve:ssm:/posterite/dynamodb_table:1}}"
+        S3_BUCKET_NAME: "{{resolve:ssm:/posterite/s3_bucket:1}}"
+        SENDER_EMAIL_ADDRESS: "{{resolve:ssm:/posterite/sender_email:1}}"
+        BASE_URL: "{{resolve:ssm:/posterite/base_url:1}}"
+        TOKEN_TTL_SECONDS: "{{resolve:ssm:/posterite/token_ttl:1}}"
+        OTP_TTL_SECONDS: "{{resolve:ssm:/posterite/otp_ttl:1}}"
+        SES_IDENTITY_ARN: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
+        OTP_URL_BASE: "{{resolve:ssm:/posterite/otp_url_base:1}}"
 
 Resources:
   ApiGatewayLogGroup:
@@ -60,9 +52,9 @@ Resources:
       Handler: app.lambda_handler
       Policies:
         - DynamoDBWritePolicy:
-            TableName: !Ref PosteritETableName
+            TableName: "{{resolve:ssm:/posterite/dynamodb_table:1}}"
         - S3WritePolicy:
-            BucketName: !Ref PosteritES3BucketName
+            BucketName: "{{resolve:ssm:/posterite/s3_bucket:1}}"
       Events:
         ApiEvent:
           Type: Api
@@ -78,11 +70,6 @@ Resources:
     Properties:
       CodeUri: functions/activation_lambda/
       Handler: app.lambda_handler
-      Environment:
-        Variables:
-          SENDER_EMAIL_ADDRESS: "noreply@POSTERITE.RUN.PLACE"
-          RELEASE_LAMBDA_ARN: !GetAtt ReleaseLambdaFunction.Arn
-          SCHEDULER_ROLE_ARN: !GetAtt SchedulerToLambdaRole.Arn
       Policies:
         - Statement:
             - Sid: AllowReadAndUpdateStateInDynamoDB
@@ -90,11 +77,11 @@ Resources:
               Action:
                 - dynamodb:GetItem
                 - dynamodb:UpdateItem
-              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PosteritETableName}
+              Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn:1}}"
             - Sid: AllowSendActivationEmail
               Effect: Allow
               Action: ses:SendEmail
-              Resource: !Ref SESIdentityArn
+              Resource: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
             - Sid: AllowCreateEventBridgeSchedule
               Effect: Allow
               Action: scheduler:CreateSchedule
@@ -129,11 +116,11 @@ Resources:
               Action:
                 - dynamodb:GetItem
                 - dynamodb:UpdateItem
-              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PosteritETableName}
+              Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn:1}}"
             - Sid: AllowSendCancellationEmail
               Effect: Allow
               Action: ses:SendEmail
-              Resource: !Ref SESIdentityArn
+              Resource: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
       Events:
         ApiEvent:
           Type: Api
@@ -147,15 +134,9 @@ Resources:
     Properties:
       CodeUri: functions/release_lambda/
       Handler: app.lambda_handler
-      Environment:
-        Variables:
-          BASE_URL: "https://posterite.app"
-          SENDER_EMAIL_ADDRESS: "noreply@POSTERITE.RUN.PLACE"
-          TOKEN_TTL_SECONDS: "300"
-          OTP_TTL_SECONDS: "600"
       Policies:
         - S3ReadPolicy:
-            BucketName: !Ref PosteritES3BucketName
+            BucketName: "{{resolve:ssm:/posterite/s3_bucket:1}}"
         - Statement:
             - Sid: AllowManageStateAndTokensInDynamoDB
               Effect: Allow
@@ -163,11 +144,11 @@ Resources:
                 - dynamodb:GetItem
                 - dynamodb:UpdateItem
                 - dynamodb:DeleteItem
-              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PosteritETableName}
+              Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn:1}}"
             - Sid: AllowSendMfaAndReleaseEmails
               Effect: Allow
               Action: ses:SendEmail
-              Resource: !Ref SESIdentityArn
+              Resource: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
       Events:
         VerifyMfaEvent:
           Type: Api

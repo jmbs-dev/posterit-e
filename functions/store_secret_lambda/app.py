@@ -20,15 +20,8 @@ ENCRYPTED_PAYLOAD_SK = "ENCRYPTED_PAYLOAD"
 s3_client = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
 
-logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-if not logger.hasHandlers():
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
 
 class ValidationException(ValueError):
     """Custom exception for request validation errors."""

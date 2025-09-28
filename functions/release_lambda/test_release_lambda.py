@@ -2,6 +2,9 @@ import json
 import pytest
 import time
 from unittest.mock import patch, MagicMock
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from functions.release_lambda import app
 
 @pytest.fixture(autouse=True)
@@ -13,7 +16,7 @@ def mock_env(monkeypatch):
 # --- EventBridge Scheduler (Inicio de MFA) ---
 def test_scheduler_happy_path():
     event = {"source": "aws.scheduler", "secretId": "sec-123"}
-    config_item = {"processStatus": "ACTIVATION_PENDING", "beneficiaryContact": "user@example.com"}
+    config_item = {"processStatus": "ACTIVATION_PENDING", "beneficiaryMfaContact": "user@example.com"}
     with patch.object(app, 'dynamodb') as mock_dynamodb, \
          patch.object(app, 'ses_client') as mock_ses:
         table = MagicMock()
@@ -25,12 +28,12 @@ def test_scheduler_happy_path():
         table.update_item.assert_called_once()
         mock_ses.send_email.assert_called_once()
         args, kwargs = mock_ses.send_email.call_args
-        assert kwargs['Destination']['ToAddresses'] == [config_item['beneficiaryContact']]
+        assert kwargs['Destination']['ToAddresses'] == [config_item['beneficiaryMfaContact']]
         assert "verificación" in kwargs['Message']['Body']['Text']['Data']
 
 def test_scheduler_invalid_state():
     event = {"source": "aws.scheduler", "secretId": "sec-123"}
-    config_item = {"processStatus": "INITIAL", "beneficiaryContact": "user@example.com"}
+    config_item = {"processStatus": "INITIAL", "beneficiaryMfaContact": "user@example.com"}
     with patch.object(app, 'dynamodb') as mock_dynamodb, \
          patch.object(app, 'ses_client') as mock_ses:
         table = MagicMock()
@@ -52,7 +55,7 @@ def test_mfa_verify_happy_path():
         "processStatus": "MFA_PENDING",
         "otpCode": "654321",
         "otpExpiresAt": now + 100,
-        "beneficiaryContact": "user@example.com"
+        "beneficiaryMfaContact": "user@example.com"
     }
     with patch.object(app, 'dynamodb') as mock_dynamodb, \
          patch.object(app, 'ses_client') as mock_ses, \
@@ -81,7 +84,7 @@ def test_mfa_verify_wrong_otp():
         "processStatus": "MFA_PENDING",
         "otpCode": "654321",
         "otpExpiresAt": now + 100,
-        "beneficiaryContact": "user@example.com"
+        "beneficiaryMfaContact": "user@example.com"
     }
     with patch.object(app, 'dynamodb') as mock_dynamodb:
         table = MagicMock()
@@ -102,7 +105,7 @@ def test_mfa_verify_expired_otp():
         "processStatus": "MFA_PENDING",
         "otpCode": "654321",
         "otpExpiresAt": now - 100,
-        "beneficiaryContact": "user@example.com"
+        "beneficiaryMfaContact": "user@example.com"
     }
     with patch.object(app, 'dynamodb') as mock_dynamodb:
         table = MagicMock()
@@ -123,7 +126,7 @@ def test_mfa_verify_invalid_state():
         "processStatus": "INITIAL",
         "otpCode": "654321",
         "otpExpiresAt": now + 100,
-        "beneficiaryContact": "user@example.com"
+        "beneficiaryMfaContact": "user@example.com"
     }
     with patch.object(app, 'dynamodb') as mock_dynamodb:
         table = MagicMock()

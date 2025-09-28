@@ -6,11 +6,6 @@ region = "us-east-2"
 confirm_changeset = false
 capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
 disable_rollback = false
-parameter_overrides = [
-  "PosteritETableName=PosteritETable",
-  "PosteritES3BucketName=posterite",
-  "SESIdentityArn=arn:aws:ses:us-east-2:181468013573:identity/posterite.run.place"
-]
 s3_prefix = "posterit-e-mvp"
 image_repositories = []
 
@@ -21,5 +16,4 @@ s3_prefix = "posterit-e-core"
 region = "us-east-2"
 profile = "personal"
 capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
-parameter_overrides = "PosteritETableName=\"PosteritETable\" PosteritES3BucketName=\"posterite\" SESIdentityArn=\"SESIdentityArn=arn:aws:ses:us-east-2:181468013573:identity/posterite.run.place\""
 image_repositories = []
