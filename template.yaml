@@ -124,13 +124,24 @@ Resources:
               Action:
                 - dynamodb:GetItem
                 - dynamodb:UpdateItem
-              Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn:1}}"
+              Resource: !GetAtt PosteritETable.Arn
+            - Sid: AllowQueryCancellationIndex
+              Effect: Allow
+              Action:
+                - dynamodb:Query
+              Resource:
+                - !GetAtt PosteritETable.Arn
+                - !Sub "${PosteritETable.Arn}/index/CancellationIndex"
             - Sid: AllowSendEmails
               Effect: Allow
               Action:
                 - ses:SendEmail
                 - ses:SendRawEmail
               Resource: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
+            - Sid: AllowDeleteEventBridgeSchedule
+              Effect: Allow
+              Action: scheduler:DeleteSchedule
+              Resource: !Sub "arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/*"
       Events:
         ApiEvent:
           Type: Api
@@ -138,6 +149,28 @@ Resources:
             Path: /cancel
             Method: post
             RestApiId: !Ref PosteritEApi
+        CancelOptionsEvent:
+          Type: Api
+          Properties:
+            Path: /cancel
+            Method: options
+            RestApiId: !Ref PosteritEApi
+            Auth: null
+            MethodResponses:
+              - StatusCode: 200
+                ResponseParameters:
+                  method.response.header.Access-Control-Allow-Origin: true
+                  method.response.header.Access-Control-Allow-Headers: true
+                  method.response.header.Access-Control-Allow-Methods: true
+            IntegrationResponses:
+              - StatusCode: 200
+                ResponseParameters:
+                  method.response.header.Access-Control-Allow-Origin: "'*'"
+                  method.response.header.Access-Control-Allow-Headers: "'Content-Type'"
+                  method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+                ResponseTemplates:
+                  application/json: '{}'
+                SelectionPattern: ''
 
   ReleaseLambdaFunction:
     Type: AWS::Serverless::Function
@@ -214,6 +247,31 @@ Resources:
       RestApiId: !Ref PosteritEApi
       Stage: Prod
       BasePath: ""
+
+  PosteritETable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "{{resolve:ssm:/posterite/dynamodb_table:1}}"
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: cancellation_token
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: CancellationIndex
+          KeySchema:
+            - AttributeName: cancellation_token
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
 
 Outputs:
   PosteritEApiUrl:
