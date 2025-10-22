@@ -18,14 +18,15 @@ Globals:
         BASE_URL: "{{resolve:ssm:/posterite/base_url:1}}"
         TOKEN_TTL_SECONDS: "{{resolve:ssm:/posterite/token_ttl:1}}"
         OTP_TTL_SECONDS: "{{resolve:ssm:/posterite/otp_ttl:1}}"
-        SES_IDENTITY_ARN: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
         OTP_URL_BASE: "{{resolve:ssm:/posterite/otp_url_base:1}}"
 
 Resources:
+  # --- API Gateway ---
   ApiGatewayLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /aws/api-gateway/posterit-e-mvp-api
+      RetentionInDays: 7
 
   PosteritEApi:
     Type: AWS::Serverless::Api
@@ -34,7 +35,7 @@ Resources:
       Cors:
         AllowMethods: "'POST, GET, OPTIONS'"
         AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-        AllowOrigin: "'*'"
+        AllowOrigin: "'*'" # Production Recommended: "'{{resolve:ssm:/posterite/frontend_url:1}}'"
       AccessLogSetting:
         DestinationArn: !GetAtt ApiGatewayLogGroup.Arn
         Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","caller":"$context.identity.caller","user":"$context.identity.user","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength"}'
@@ -45,6 +46,7 @@ Resources:
           DataTraceEnabled: true
           MetricsEnabled: true
 
+  # --- Lambda Functions ---
   StoreSecretLambdaFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -70,6 +72,10 @@ Resources:
     Properties:
       CodeUri: functions/activation_lambda/
       Handler: app.lambda_handler
+      Environment:
+        Variables:
+          RELEASE_LAMBDA_ARN: !GetAtt ReleaseLambdaFunction.Arn
+          SCHEDULER_ROLE_ARN: !GetAtt SchedulerToLambdaRole.Arn
       Policies:
         - Statement:
             - Sid: AllowReadAndUpdateStateInDynamoDB
@@ -78,9 +84,11 @@ Resources:
                 - dynamodb:GetItem
                 - dynamodb:UpdateItem
               Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn:1}}"
-            - Sid: AllowSendActivationEmail
+            - Sid: AllowSendEmails
               Effect: Allow
-              Action: ses:SendEmail
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
               Resource: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
             - Sid: AllowCreateEventBridgeSchedule
               Effect: Allow
@@ -117,9 +125,11 @@ Resources:
                 - dynamodb:GetItem
                 - dynamodb:UpdateItem
               Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn:1}}"
-            - Sid: AllowSendCancellationEmail
+            - Sid: AllowSendEmails
               Effect: Allow
-              Action: ses:SendEmail
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
               Resource: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
       Events:
         ApiEvent:
@@ -145,9 +155,11 @@ Resources:
                 - dynamodb:UpdateItem
                 - dynamodb:DeleteItem
               Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn:1}}"
-            - Sid: AllowSendMfaAndReleaseEmails
+            - Sid: AllowSendEmails
               Effect: Allow
-              Action: ses:SendEmail
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
               Resource: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
       Events:
         VerifyMfaEvent:
@@ -163,6 +175,7 @@ Resources:
             Method: get
             RestApiId: !Ref PosteritEApi
 
+  # --- IAM Roles and Custom Domain ---
   SchedulerToLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -182,6 +195,25 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource: !GetAtt ReleaseLambdaFunction.Arn
+
+  PosteriteEApiDomainName:
+    Type: AWS::ApiGateway::DomainName
+    DeletionPolicy: Retain
+    Properties:
+      DomainName: "{{resolve:ssm:/posterite/api_domain:1}}"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      RegionalCertificateArn: "{{resolve:ssm:/posterite/certificate_arn:1}}"
+
+  PosteriteEApiBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    DependsOn: PosteritEApiProdStage
+    Properties:
+      DomainName: !Ref PosteriteEApiDomainName
+      RestApiId: !Ref PosteritEApi
+      Stage: Prod
+      BasePath: ""
 
 Outputs:
   PosteritEApiUrl:

@@ -13,7 +13,7 @@ def mock_env(monkeypatch):
     monkeypatch.setenv('S3_BUCKET_NAME', 'TestBucket')
     monkeypatch.setenv('SESIdentityArn', 'test@posterite.app')
 
-# --- EventBridge Scheduler (Inicio de MFA) ---
+# --- EventBridge Scheduler (MFA) ---
 def test_scheduler_happy_path():
     event = {"source": "aws.scheduler", "secretId": "sec-123"}
     config_item = {"processStatus": "ACTIVATION_PENDING", "beneficiaryMfaContact": "user@example.com"}
