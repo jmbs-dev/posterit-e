@@ -3,6 +3,7 @@ import json
 import logging
 import boto3
 from botocore.exceptions import ClientError
+from boto3.dynamodb.conditions import Key
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -10,10 +11,17 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.resource('dynamodb')
 scheduler_client = boto3.client('scheduler')
 
+def get_cors_headers(event):
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "POST,OPTIONS,GET"
+    }
+
 CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "http://localhost:5173",
+    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "POST,OPTIONS"
+    "Access-Control-Allow-Methods": "POST,OPTIONS,GET"
 }
 
 def lambda_handler(event, context):
@@ -21,15 +29,16 @@ def lambda_handler(event, context):
     Handles the cancellation of secret custody.
     Triggered by POST /cancel
     """
+    cors_headers = get_cors_headers(event)
     try:
         body = json.loads(event.get("body", "{}"))
         cancellation_token = body.get("cancellation_token")
     except Exception:
         logger.warning("Malformed request body.")
-        return _bad_request("Malformed request body.")
+        return _bad_request("Malformed request body.", cors_headers)
     if not cancellation_token:
         logger.warning("Missing cancellation_token in request.")
-        return _bad_request("Missing cancellation_token in request.")
+        return _bad_request("Missing cancellation_token in request.", cors_headers)
 
     table_name = os.environ["DYNAMODB_TABLE_NAME"]
     gsi_name = os.environ.get("CANCELLATION_GSI_NAME", "CancellationIndex")
@@ -38,17 +47,17 @@ def lambda_handler(event, context):
     try:
         response = table.query(
             IndexName=gsi_name,
-            KeyConditionExpression=boto3.dynamodb.conditions.Key('cancellation_token').eq(cancellation_token)
+            KeyConditionExpression=Key('cancellation_token').eq(cancellation_token)
         )
         items = response.get('Items', [])
     except ClientError as e:
         logger.error(f"Error querying DynamoDB: {e}")
         _notify_owner_cancellation_failed(None, None, None, error="DynamoDB query error")
-        return _internal_error("Database query error.")
+        return _internal_error("Database query error.", cors_headers)
 
     if not items:
         logger.warning("Cancellation token not found or invalid.")
-        return _unauthorized()
+        return _unauthorized(cors_headers)
 
     item = items[0]
     pk = item['PK']
@@ -68,10 +77,10 @@ def lambda_handler(event, context):
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
             logger.warning(f"Could not cancel secret {secret_id}: invalid state.")
             _notify_owner_cancellation_failed(titular_email, secret_id, reason="invalid state")
-            return _unauthorized()
+            return _unauthorized(cors_headers)
         logger.error(f"Error updating DynamoDB state: {e}")
         _notify_owner_cancellation_failed(titular_email, secret_id, reason="DynamoDB update error")
-        return _internal_error("Error updating state.")
+        return _internal_error("Error updating state.", cors_headers)
 
     schedule_name = f"posterit-e-release-{secret_id}"
     try:
@@ -80,24 +89,30 @@ def lambda_handler(event, context):
     except ClientError as e:
         logger.error(f"Error deleting scheduled event: {e}")
         _notify_owner_cancellation_failed(titular_email, secret_id, reason="schedule deletion failed")
-        return _internal_error("Failed to delete scheduled event. The secret may still be released. Owner has been alerted.")
+        return _internal_error("Failed to delete scheduled event. The secret may still be released. Owner has been alerted.", cors_headers)
 
     if titular_email:
         _send_cancellation_email(titular_email, secret_id)
     return {
         "statusCode": 200,
-        "headers": CORS_HEADERS,
-        "body": json.dumps({"message": "Secret custody has been successfully cancelled."}),
+        "headers": cors_headers,
+        "body": json.dumps({"message": "El proceso de recuperación ha sido cancelado exitosamente."}),
     }
 
-def _bad_request(msg):
-    return {"statusCode": 400, "headers": CORS_HEADERS, "body": json.dumps({"message": msg})}
+def _bad_request(msg, cors_headers):
+    return {"statusCode": 400, "headers": cors_headers, "body": json.dumps({"message": msg})}
 
-def _unauthorized():
-    return {"statusCode": 401, "headers": CORS_HEADERS, "body": json.dumps({"message": "Unauthorized or invalid token."})}
+def _unauthorized(cors_headers):
+    return {
+        "statusCode": 401,
+        "headers": cors_headers,
+        "body": json.dumps({
+            "message": "El token de cancelación es inválido, ha expirado o ya fue utilizado."
+        })
+    }
 
-def _internal_error(msg):
-    return {"statusCode": 500, "headers": CORS_HEADERS, "body": json.dumps({"message": msg})}
+def _internal_error(msg, cors_headers):
+    return {"statusCode": 500, "headers": cors_headers, "body": json.dumps({"message": msg})}
 
 def _send_cancellation_email(to_address, secret_id):
     ses_client = boto3.client('ses')

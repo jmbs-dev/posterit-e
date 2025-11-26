@@ -12,13 +12,12 @@ Globals:
       - x86_64
     Environment:
       Variables:
-        DYNAMODB_TABLE_NAME: "{{resolve:ssm:/posterite/dynamodb_table:1}}"
-        S3_BUCKET_NAME: "{{resolve:ssm:/posterite/s3_bucket:1}}"
-        SENDER_EMAIL_ADDRESS: "{{resolve:ssm:/posterite/sender_email:1}}"
-        BASE_URL: "{{resolve:ssm:/posterite/base_url:1}}"
-        TOKEN_TTL_SECONDS: "{{resolve:ssm:/posterite/token_ttl:1}}"
-        OTP_TTL_SECONDS: "{{resolve:ssm:/posterite/otp_ttl:1}}"
-        OTP_URL_BASE: "{{resolve:ssm:/posterite/otp_url_base:1}}"
+        DYNAMODB_TABLE_NAME: "{{resolve:ssm:/posterite/dynamodb_table}}"
+        S3_BUCKET_NAME: "{{resolve:ssm:/posterite/s3_bucket}}"
+        SENDER_EMAIL_ADDRESS: "{{resolve:ssm:/posterite/sender_email}}"
+        BASE_URL: "{{resolve:ssm:/posterite/base_url}}"
+        TOKEN_TTL_SECONDS: "{{resolve:ssm:/posterite/token_ttl}}"
+        OTP_TTL_SECONDS: "{{resolve:ssm:/posterite/otp_ttl}}"
 
 Resources:
   # --- API Gateway ---
@@ -54,9 +53,9 @@ Resources:
       Handler: app.lambda_handler
       Policies:
         - DynamoDBWritePolicy:
-            TableName: "{{resolve:ssm:/posterite/dynamodb_table:1}}"
+            TableName: "{{resolve:ssm:/posterite/dynamodb_table}}"
         - S3WritePolicy:
-            BucketName: "{{resolve:ssm:/posterite/s3_bucket:1}}"
+            BucketName: "{{resolve:ssm:/posterite/s3_bucket}}"
       Events:
         ApiEvent:
           Type: Api
@@ -83,13 +82,13 @@ Resources:
               Action:
                 - dynamodb:GetItem
                 - dynamodb:UpdateItem
-              Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn:1}}"
+              Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn}}"
             - Sid: AllowSendEmails
               Effect: Allow
               Action:
                 - ses:SendEmail
                 - ses:SendRawEmail
-              Resource: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
+              Resource: "{{resolve:ssm:/posterite/ses_identity_arn}}"
             - Sid: AllowCreateEventBridgeSchedule
               Effect: Allow
               Action: scheduler:CreateSchedule
@@ -137,7 +136,7 @@ Resources:
               Action:
                 - ses:SendEmail
                 - ses:SendRawEmail
-              Resource: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
+              Resource: "{{resolve:ssm:/posterite/ses_identity_arn}}"
             - Sid: AllowDeleteEventBridgeSchedule
               Effect: Allow
               Action: scheduler:DeleteSchedule
@@ -149,28 +148,6 @@ Resources:
             Path: /cancel
             Method: post
             RestApiId: !Ref PosteritEApi
-        CancelOptionsEvent:
-          Type: Api
-          Properties:
-            Path: /cancel
-            Method: options
-            RestApiId: !Ref PosteritEApi
-            Auth: null
-            MethodResponses:
-              - StatusCode: 200
-                ResponseParameters:
-                  method.response.header.Access-Control-Allow-Origin: true
-                  method.response.header.Access-Control-Allow-Headers: true
-                  method.response.header.Access-Control-Allow-Methods: true
-            IntegrationResponses:
-              - StatusCode: 200
-                ResponseParameters:
-                  method.response.header.Access-Control-Allow-Origin: "'*'"
-                  method.response.header.Access-Control-Allow-Headers: "'Content-Type'"
-                  method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
-                ResponseTemplates:
-                  application/json: '{}'
-                SelectionPattern: ''
 
   ReleaseLambdaFunction:
     Type: AWS::Serverless::Function
@@ -179,7 +156,7 @@ Resources:
       Handler: app.lambda_handler
       Policies:
         - S3ReadPolicy:
-            BucketName: "{{resolve:ssm:/posterite/s3_bucket:1}}"
+            BucketName: "{{resolve:ssm:/posterite/s3_bucket}}"
         - Statement:
             - Sid: AllowManageStateAndTokensInDynamoDB
               Effect: Allow
@@ -187,13 +164,13 @@ Resources:
                 - dynamodb:GetItem
                 - dynamodb:UpdateItem
                 - dynamodb:DeleteItem
-              Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn:1}}"
+              Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn}}"
             - Sid: AllowSendEmails
               Effect: Allow
               Action:
                 - ses:SendEmail
                 - ses:SendRawEmail
-              Resource: "{{resolve:ssm:/posterite/ses_identity_arn:1}}"
+              Resource: "{{resolve:ssm:/posterite/ses_identity_arn}}"
       Events:
         VerifyMfaEvent:
           Type: Api
@@ -233,11 +210,11 @@ Resources:
     Type: AWS::ApiGateway::DomainName
     DeletionPolicy: Retain
     Properties:
-      DomainName: "{{resolve:ssm:/posterite/api_domain:1}}"
+      DomainName: "{{resolve:ssm:/posterite/api_domain}}"
       EndpointConfiguration:
         Types:
           - REGIONAL
-      RegionalCertificateArn: "{{resolve:ssm:/posterite/certificate_arn:1}}"
+      RegionalCertificateArn: "{{resolve:ssm:/posterite/certificate_arn}}"
 
   PosteriteEApiBasePathMapping:
     Type: AWS::ApiGateway::BasePathMapping
@@ -251,7 +228,7 @@ Resources:
   PosteritETable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: "{{resolve:ssm:/posterite/dynamodb_table:1}}"
+      TableName: "{{resolve:ssm:/posterite/dynamodb_table}}"
       AttributeDefinitions:
         - AttributeName: PK
           AttributeType: S

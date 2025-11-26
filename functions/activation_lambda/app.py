@@ -13,6 +13,7 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.resource('dynamodb')
 CONFIG_SK = "CONFIG"
 scheduler_client = boto3.client('scheduler')
+BASE_URL = os.environ.get("BASE_URL", "https://posterite.app")
 
 def lambda_handler(event, context):
     """
@@ -63,13 +64,13 @@ def _format_response(status_code, body_dict):
     }
 
 def _unauthorized():
-    return _format_response(401, {"message": "Unauthorized."})
+    return _format_response(401, {"message": "The verification hash is incorrect."})
 
-def _conflict():
-    return _format_response(409, {"message": "The recovery process for this secret is already active or has ended."})
+def _not_found():
+    return _format_response(404, {"message": "The secret ID was not found."})
 
 def _bad_request(msg):
-    return _format_response(400, {"message": msg})
+    return _format_response(409, {"message": "The recovery process for this secret is already active."})
 
 def _method_not_allowed():
     return _format_response(405, {"message": "Method Not Allowed."})
@@ -108,8 +109,8 @@ def _send_activation_email(to_address, cancellation_token):
         logger.warning("SENDER_EMAIL_ADDRESS not configured; skipping email send")
         raise Exception("SENDER_EMAIL_ADDRESS not configured")
     subject = "Alerta de seguridad: Se ha iniciado un proceso de recuperación para tu secreto en Posterit-E"
-    base_url = os.environ.get("BASE_URL", "https://posterite.app")
-    cancel_url = f"{base_url}/cancel?token={cancellation_token}"
+
+    cancel_url = f"{BASE_URL}/cancel?token={cancellation_token}"
     body = (
         f"Hola,\n\nSe ha iniciado un proceso de recuperación para tu secreto en Posterit-E. "
         f"Si NO autorizaste este proceso, puedes cancelarlo inmediatamente usando el siguiente enlace seguro:\n\n"
@@ -153,7 +154,7 @@ def _schedule_secret_release(secret_id, grace_period_seconds):
         except Exception:
             logger.error(f"gracePeriodSeconds invalid for secretId {secret_id}: {grace_period_seconds}")
             raise ValueError("The gracePeriodSeconds attribute is invalid or not present.")
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     release_time = now + datetime.timedelta(seconds=grace_period_seconds)
     schedule_expression = f"at({release_time.strftime('%Y-%m-%dT%H:%M:%S')})"
     release_lambda_arn = os.environ["RELEASE_LAMBDA_ARN"]
@@ -167,7 +168,7 @@ def _schedule_secret_release(secret_id, grace_period_seconds):
             Target={
                 "Arn": release_lambda_arn,
                 "RoleArn": scheduler_role_arn,
-                "Input": json.dumps({"secretId": secret_id})
+                "Input": json.dumps({"source": "aws.scheduler", "secretId": secret_id})
             },
             FlexibleTimeWindow={"Mode": "OFF"}
         )
@@ -209,7 +210,7 @@ def verify_and_activate_process(event, table_name):
         return _unauthorized()
     if item.get("processStatus") != "INITIAL":
         logger.warning(f"processStatus is not INITIAL for secretId {secret_id}")
-        return _conflict()
+        return _not_found()
 
     stored_hash = item["passwordHashCr"]
     if not hmac.compare_digest(str(client_hash), str(stored_hash)):
@@ -246,3 +247,4 @@ def verify_and_activate_process(event, table_name):
 
     logger.info(f"Activation process started for secretId {secret_id}. Owner notified and release scheduled.")
     return _format_response(200, {"message": "Activation process started. The Owner has been notified and the grace period has begun."})
+

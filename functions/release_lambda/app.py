@@ -16,7 +16,7 @@ TOKEN_TTL_SECONDS = int(os.environ.get('TOKEN_TTL_SECONDS', '300'))  # 5 minutes
 OTP_TTL_SECONDS = int(os.environ.get('OTP_TTL_SECONDS', '600'))    # 10 minutes
 BASE_URL = os.environ.get('BASE_URL', 'https://posterite.app')
 SENDER_EMAIL_ADDRESS = os.environ.get('SENDER_EMAIL_ADDRESS')
-OTP_URL_BASE = os.environ.get('OTP_URL_BASE', 'https://posterite.app/otp')
+OTP_URL_BASE = BASE_URL + '/otp'
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -345,7 +345,7 @@ def _handle_mfa_verify(event, request_id=None):
         body = json.loads(event.get('body') or '{}')
         secret_id = body.get('secretId')
         logger.info(f"MFA verify requested. RequestId: {request_id}, SecretId: {secret_id}")
-        otp_code = body.get('otpCode')
+        otp_code = body.get('otp')
     except (json.JSONDecodeError, KeyError):
         logger.warning(f"Invalid or missing request body for MFA verify. RequestId: {request_id}")
         return _format_response(400, {"message": "Invalid or missing request body."})
