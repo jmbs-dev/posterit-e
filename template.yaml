@@ -52,8 +52,14 @@ Resources:
       CodeUri: functions/store_secret_lambda/
       Handler: app.lambda_handler
       Policies:
-        - DynamoDBWritePolicy:
-            TableName: "{{resolve:ssm:/posterite/dynamodb_table}}"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:TransactWriteItems
+              Resource: !GetAtt PosteritETable.Arn
         - S3WritePolicy:
             BucketName: "{{resolve:ssm:/posterite/s3_bucket}}"
       Events:
@@ -123,14 +129,15 @@ Resources:
               Action:
                 - dynamodb:GetItem
                 - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
               Resource: !GetAtt PosteritETable.Arn
-            - Sid: AllowQueryCancellationIndex
+            - Sid: AllowQueryTokenIndex
               Effect: Allow
               Action:
                 - dynamodb:Query
               Resource:
                 - !GetAtt PosteritETable.Arn
-                - !Sub "${PosteritETable.Arn}/index/CancellationIndex"
+                - !Sub "${PosteritETable.Arn}/index/TokenIndex"
             - Sid: AllowSendEmails
               Effect: Allow
               Action:
@@ -164,6 +171,7 @@ Resources:
                 - dynamodb:GetItem
                 - dynamodb:UpdateItem
                 - dynamodb:DeleteItem
+                - dynamodb:PutItem
               Resource: "{{resolve:ssm:/posterite/dynamodb_table_arn}}"
             - Sid: AllowSendEmails
               Effect: Allow
@@ -216,7 +224,7 @@ Resources:
           - REGIONAL
       RegionalCertificateArn: "{{resolve:ssm:/posterite/certificate_arn}}"
 
-  PosteriteEApiBasePathMapping:
+  PosteritEApiBasePathMapping:
     Type: AWS::ApiGateway::BasePathMapping
     DependsOn: PosteritEApiProdStage
     Properties:
@@ -234,7 +242,7 @@ Resources:
           AttributeType: S
         - AttributeName: SK
           AttributeType: S
-        - AttributeName: cancellation_token
+        - AttributeName: tokenValue
           AttributeType: S
       KeySchema:
         - AttributeName: PK
@@ -242,12 +250,12 @@ Resources:
         - AttributeName: SK
           KeyType: RANGE
       GlobalSecondaryIndexes:
-        - IndexName: CancellationIndex
+        - IndexName: TokenIndex
           KeySchema:
-            - AttributeName: cancellation_token
+            - AttributeName: tokenValue
               KeyType: HASH
           Projection:
-            ProjectionType: ALL
+            ProjectionType: KEYS_ONLY
       BillingMode: PAY_PER_REQUEST
 
 Outputs:

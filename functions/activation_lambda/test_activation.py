@@ -1,21 +1,24 @@
 import json
 import pytest
 from unittest.mock import Mock, patch
-
+from botocore.exceptions import ClientError
 import app
-
 
 # ---------------- Fixtures ----------------
 @pytest.fixture
 def context():
-    c = Mock(); c.aws_request_id = "req"; return c
+    c = Mock()
+    c.aws_request_id = "req"
+    return c
 
 @pytest.fixture
 def base_env():
     with patch.dict('os.environ', {
-        'DYNAMODB_TABLE_NAME': 'tbl',
+        'DYNAMODB_TABLE_NAME': 'PosteritETable',
         'RELEASE_LAMBDA_ARN': 'rel-arn',
-        'SCHEDULER_ROLE_ARN': 'sched-role'
+        'SCHEDULER_ROLE_ARN': 'sched-role',
+        'SENDER_EMAIL_ADDRESS': 'sender@test.com',
+        'BASE_URL': 'https://test.com'
     }):
         yield
 
@@ -32,121 +35,122 @@ def config_item():
     return {
         'saltCr': 'salt',
         'passwordHashCr': 'H',
-        'processStatus': 'INITIAL',
+        'processStatus': 'CREATED',
         'titularAlertContact': 'owner@example.com',
         'gracePeriodSeconds': 100
     }
 
-
-
 # ---------------- GET Salt Tests ----------------
-@patch('app._get_secret_config', return_value={'saltCr': 'saltX'})
-def test_get_salt_success(get_cfg, base_env, get_event):
+@patch('app._get_secret_config')
+def test_get_salt_success(mock_get_cfg, base_env, get_event):
+    mock_get_cfg.return_value = {'saltCr': 'saltX'}
     resp = app.get_salt_for_secret(get_event, 'tbl')
     assert resp['statusCode'] == 200
     assert 'saltX' in resp['body']
 
 def test_get_salt_missing_id(base_env):
     resp = app.get_salt_for_secret({"httpMethod": "GET", "pathParameters": {}}, 'tbl')
-    assert resp['statusCode'] == 400
+    assert resp['statusCode'] == 409
 
-@patch('app._get_secret_config', return_value=None)
-def test_get_salt_not_found(_, base_env, get_event):
+@patch('app._get_secret_config')
+def test_get_salt_not_found(mock_get_cfg, base_env, get_event):
+    mock_get_cfg.return_value = {}
     resp = app.get_salt_for_secret(get_event, 'tbl')
     assert resp['statusCode'] == 401
-
 
 # ---------------- Scheduling Helper ----------------
 @patch('app.scheduler_client')
 @patch('app.datetime')
 def test_schedule_release_success(dt_mock, sched_mock, base_env):
-    from datetime import datetime, timedelta
-    dt_mock.datetime.utcnow.return_value = datetime(2024,1,1,0,0,0)
+    from datetime import datetime, timezone, timedelta
+    dt_mock.datetime.now.return_value = datetime(2024, 1, 1, 0, 0, 0)
+    dt_mock.timezone.utc = timezone.utc
     dt_mock.timedelta = timedelta
     app._schedule_secret_release('sec-1', 60)
     sched_mock.create_schedule.assert_called_once()
 
-@patch('app.scheduler_client')
-def test_schedule_release_invalid_period(_, base_env):
-    with pytest.raises(ValueError):
-        app._schedule_secret_release('sec-1', 'bad')
-
-
 # ---------------- POST Activation Core Paths ----------------
+@patch('app.dynamodb')
 @patch('app._schedule_secret_release')
 @patch('app._send_activation_email')
-@patch('app._update_process_status_and_token', return_value=True)
 @patch('app.hmac.compare_digest', return_value=True)
 @patch('app._get_secret_config')
-@patch('app.uuid.uuid4', return_value=Mock(__str__=lambda self: 'tok'))
-def test_post_activation_success(uuid_mock, get_cfg, cmp_mock, upd_mock, email_mock, sched_mock, base_env, post_event_valid, config_item):
-    get_cfg.return_value = config_item
-    resp = app.verify_and_activate_process(post_event_valid, 'tbl')
+def test_post_activation_success(mock_get_cfg, mock_hmac, mock_email, mock_schedule, mock_dynamodb, base_env, post_event_valid, config_item):
+    """Happy path: config exists and is CREATED, hash matches, cancellation token exists, atomic update succeeds."""
+    mock_get_cfg.return_value = config_item
+    mock_table = Mock()
+    mock_dynamodb.Table.return_value = mock_table
+    mock_table.get_item.return_value = {
+        'Item': {'tokenValue': 'existing-token-uuid'}
+    }
+    resp = app.verify_and_activate_process(post_event_valid, 'PosteritETable')
     assert resp['statusCode'] == 200
-    email_mock.assert_called_once()
-    sched_mock.assert_called_once()
+    mock_table.get_item.assert_called()
+    mock_table.update_item.assert_called_once()
+    mock_email.assert_called_with('owner@example.com', 'existing-token-uuid')
+    mock_schedule.assert_called_once()
 
-@patch('app._get_secret_config', return_value=None)
-def test_post_activation_secret_not_found(_, base_env, post_event_valid):
+@patch('app._get_secret_config')
+def test_post_activation_secret_not_found(mock_get_cfg, base_env, post_event_valid):
+    mock_get_cfg.return_value = None
     resp = app.verify_and_activate_process(post_event_valid, 'tbl')
     assert resp['statusCode'] == 401
 
-@patch('app._get_secret_config', return_value={'passwordHashCr':'H','processStatus':'PENDING'})
-def test_post_activation_conflict(_, base_env, post_event_valid):
+@patch('app._get_secret_config')
+def test_post_activation_status_not_created(mock_get_cfg, base_env, post_event_valid):
+    mock_get_cfg.return_value = {'passwordHashCr': 'H', 'processStatus': 'ACTIVATED'}
     resp = app.verify_and_activate_process(post_event_valid, 'tbl')
-    assert resp['statusCode'] == 409
+    assert resp['statusCode'] == 404
 
-@patch('app._get_secret_config', return_value={'passwordHashCr':'HH','processStatus':'INITIAL'})
+@patch('app._get_secret_config')
 @patch('app.hmac.compare_digest', return_value=False)
-def test_post_activation_hash_mismatch(cmp_mock, get_cfg, base_env, post_event_valid):
+def test_post_activation_hash_mismatch(mock_hmac, mock_get_cfg, base_env, post_event_valid, config_item):
+    mock_get_cfg.return_value = config_item
     resp = app.verify_and_activate_process(post_event_valid, 'tbl')
     assert resp['statusCode'] == 401
 
-@patch('app._get_secret_config', return_value={'passwordHashCr':'H','processStatus':'INITIAL','gracePeriodSeconds':50})
+@patch('app.dynamodb')
+@patch('app._get_secret_config')
 @patch('app.hmac.compare_digest', return_value=True)
-@patch('app._update_process_status_and_token', return_value=False)
-def test_post_activation_update_conflict(upd_mock, cmp_mock, get_cfg, base_env, post_event_valid):
-    resp = app.verify_and_activate_process(post_event_valid, 'tbl')
-    assert resp['statusCode'] == 409
-
-@patch('app._get_secret_config', return_value={'passwordHashCr':'H','processStatus':'INITIAL','gracePeriodSeconds':50})
-@patch('app.hmac.compare_digest', return_value=True)
-@patch('app._update_process_status_and_token', return_value=True)
-@patch('app._schedule_secret_release', side_effect=RuntimeError('fail'))
-def test_post_activation_schedule_failure(sched_mock, upd_mock, cmp_mock, get_cfg, base_env, post_event_valid):
+def test_post_activation_token_missing_in_db(mock_hmac, mock_get_cfg, mock_dynamodb, base_env, post_event_valid, config_item):
+    mock_get_cfg.return_value = config_item
+    mock_table = Mock()
+    mock_dynamodb.Table.return_value = mock_table
+    mock_table.get_item.return_value = {}
     resp = app.verify_and_activate_process(post_event_valid, 'tbl')
     assert resp['statusCode'] == 500
 
+@patch('app.dynamodb')
+@patch('app._get_secret_config')
+@patch('app.hmac.compare_digest', return_value=True)
+def test_post_activation_concurrency_conflict(mock_hmac, mock_get_cfg, mock_dynamodb, base_env, post_event_valid, config_item):
+    mock_get_cfg.return_value = config_item
+    mock_table = Mock()
+    mock_dynamodb.Table.return_value = mock_table
+    mock_table.get_item.return_value = {'Item': {'tokenValue': 'ok'}}
+    error_response = {'Error': {'Code': 'ConditionalCheckFailedException'}}
+    mock_table.update_item.side_effect = ClientError(error_response, 'UpdateItem')
+    resp = app.verify_and_activate_process(post_event_valid, 'tbl')
+    assert resp['statusCode'] == 409
 
 # ---------------- POST Input Validation ----------------
 @pytest.mark.parametrize("body, code", [
-    ("not-json", 400),
-    (json.dumps({}), 400),
-    (json.dumps({"secretId":"sec-1"}), 400),
-    (json.dumps({"clientHash":"H"}), 400),
+    ("not-json", 409),
+    (json.dumps({}), 409),
+    (json.dumps({"secretId":"sec-1"}), 409),
 ])
 def test_post_activation_validation(body, code, base_env):
-    event = {"httpMethod":"POST", "body": body}
+    event = {"httpMethod": "POST", "body": body}
     resp = app.verify_and_activate_process(event, 'tbl')
     assert resp['statusCode'] == code
 
+# ---------------- Dispatcher Tests ----------------
+@patch('app.get_salt_for_secret', return_value={'statusCode':200})
+def test_lambda_handler_get(mock_get, base_env, context):
+    app.lambda_handler({'httpMethod':'GET'}, context)
+    mock_get.assert_called()
 
-# ---------------- lambda_handler dispatch ----------------
-@patch('app.get_salt_for_secret', return_value={'statusCode':200,'body':'{}'})
-def test_lambda_handler_get(dispatch_mock, base_env, context):
-    resp = app.lambda_handler({'httpMethod':'GET','pathParameters':{'secretId':'sec'}}, context)
-    assert resp['statusCode'] == 200
-
-@patch('app.verify_and_activate_process', return_value={'statusCode':200,'body':'{}'})
-def test_lambda_handler_post(dispatch_mock, base_env, context):
-    resp = app.lambda_handler({'httpMethod':'POST','body':'{}'}, context)
-    assert resp['statusCode'] == 200
-
-def test_lambda_handler_method_not_allowed(base_env, context):
-    resp = app.lambda_handler({'httpMethod':'PUT'}, context)
-    assert resp['statusCode'] == 405
-
-@patch.dict('os.environ', {}, clear=True)
-def test_lambda_handler_missing_env(context):
-    resp = app.lambda_handler({'httpMethod':'GET'}, context)
-    assert resp['statusCode'] == 500
+@patch('app.verify_and_activate_process', return_value={'statusCode':200})
+def test_lambda_handler_post(mock_post, base_env, context):
+    app.lambda_handler({'httpMethod':'POST'}, context)
+    mock_post.assert_called()

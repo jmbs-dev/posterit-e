@@ -1,164 +1,256 @@
 import os
 import json
-import logging
 import boto3
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key
+import logging
+
+# === Constants ===
+CONFIG_SORT_KEY = "CONFIG"
+TOKEN_CANCEL_SORT_KEY = "TOKEN#CANCEL"
+TOKEN_INDEX_NAME = "TokenIndex"
+EVENTBRIDGE_SCHEDULE_PREFIX = "posterit-e-release-"
+DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
+EVENTBRIDGE_ARN = os.environ.get('EVENTBRIDGE_ARN')
+SES_IDENTITY_ARN = os.environ.get('SESIdentityArn', 'noreply@posterite.app')
+
+STATUS_ACTIVATION_PENDING = "ACTIVATION_PENDING"
+STATUS_CANCELLED = "CANCELLED"
+
+HTTP_STATUS_OK = 200
+HTTP_STATUS_BAD_REQUEST = 400
+HTTP_STATUS_UNAUTHORIZED = 401
+HTTP_STATUS_NOT_FOUND = 404
+HTTP_STATUS_CONFLICT = 409
+HTTP_STATUS_INTERNAL_ERROR = 500
+
+MSG_MISSING_TOKEN = "Missing cancellation token."
+MSG_INVALID_TOKEN = "Invalid or expired cancellation token."
+MSG_SECRET_NOT_FOUND = "Secret not found."
+MSG_INVALID_STATE = "Process cannot be cancelled in its current state."
+MSG_ALREADY_CANCELLED = "Process already cancelled or not pending."
+MSG_INTERNAL_ERROR = "Internal error during cancellation."
+MSG_SERVER_ERROR = "Internal server error."
+MSG_CANCELLED_SUCCESS = "Process cancelled successfully."
+
+RELEASE_TOKEN_SORT_KEY = "TOKEN#RELEASE"
+
+# === AWS Clients ===
+session = boto3.session.Session()
+dynamodb_resource = session.resource('dynamodb')
+dynamodb_client = session.client('dynamodb')
+scheduler_client = session.client('scheduler')
+ses_client = session.client('ses')
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-dynamodb = boto3.resource('dynamodb')
-scheduler_client = boto3.client('scheduler')
-
-def get_cors_headers(event):
-    return {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "POST,OPTIONS,GET"
-    }
-
-CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "POST,OPTIONS,GET"
-}
-
 def lambda_handler(event, context):
     """
-    Handles the cancellation of secret custody.
-    Triggered by POST /cancel
+    AWS Lambda entry point for cancellation requests.
+    Args:
+        event (dict): Lambda event payload.
+        context (LambdaContext): Lambda context object.
+    Returns:
+        dict: API Gateway-compatible response.
     """
-    cors_headers = get_cors_headers(event)
     try:
-        body = json.loads(event.get("body", "{}"))
-        cancellation_token = body.get("cancellation_token")
+        request_body = _parse_request_body(event)
+        cancellation_token = _extract_cancellation_token(request_body)
+        if not cancellation_token:
+            return _build_response(HTTP_STATUS_BAD_REQUEST, MSG_MISSING_TOKEN)
+
+        token_item = _get_token_item_by_value(cancellation_token)
+        if not token_item:
+            return _build_response(HTTP_STATUS_UNAUTHORIZED, MSG_INVALID_TOKEN)
+
+        partition_key = token_item['PK']
+        secret_id = partition_key.replace('SECRET#', '')
+        config_item = _get_config_item(partition_key)
+        if not config_item:
+            return _build_response(HTTP_STATUS_NOT_FOUND, MSG_SECRET_NOT_FOUND)
+
+        titular_email = config_item.get('titularAlertContact')
+        process_status = config_item.get('processStatus')
+        if process_status != STATUS_ACTIVATION_PENDING:
+            return _build_response(HTTP_STATUS_CONFLICT, MSG_INVALID_STATE)
+
+        transaction_success = _cancel_process_transaction(partition_key)
+        if transaction_success == 'conflict':
+            return _build_response(HTTP_STATUS_CONFLICT, MSG_ALREADY_CANCELLED)
+        elif transaction_success == 'error':
+            return _build_response(HTTP_STATUS_INTERNAL_ERROR, MSG_INTERNAL_ERROR)
+
+        _delete_eventbridge_schedule(secret_id)
+        if titular_email:
+            _send_cancellation_email(titular_email, secret_id)
+
+        return _build_response(HTTP_STATUS_OK, MSG_CANCELLED_SUCCESS)
+    except Exception as exc:
+        logger.error(f"Unhandled exception: {exc}", exc_info=True)
+        return _build_response(HTTP_STATUS_INTERNAL_ERROR, MSG_SERVER_ERROR)
+
+def _parse_request_body(event):
+    """
+    Parses the request body from the event.
+    Args:
+        event (dict): Lambda event payload.
+    Returns:
+        dict: Parsed JSON body.
+    """
+    try:
+        return json.loads(event.get('body', '{}'))
     except Exception:
-        logger.warning("Malformed request body.")
-        return _bad_request("Malformed request body.", cors_headers)
-    if not cancellation_token:
-        logger.warning("Missing cancellation_token in request.")
-        return _bad_request("Missing cancellation_token in request.", cors_headers)
+        return {}
 
-    table_name = os.environ["DYNAMODB_TABLE_NAME"]
-    gsi_name = os.environ.get("CANCELLATION_GSI_NAME", "CancellationIndex")
-    table = dynamodb.Table(table_name)
+def _extract_cancellation_token(body):
+    """
+    Extracts the cancellation token from the request body.
+    Args:
+        body (dict): Parsed request body.
+    Returns:
+        str or None: Cancellation token value.
+    """
+    return body.get('token') or body.get('cancellation_token')
 
+def _get_token_item_by_value(token_value):
+    """
+    Queries DynamoDB GSI to find the cancellation token item.
+    Args:
+        token_value (str): The cancellation token value.
+    Returns:
+        dict or None: Token item if found, else None.
+    """
+    table = dynamodb_resource.Table(DYNAMODB_TABLE_NAME)
     try:
         response = table.query(
-            IndexName=gsi_name,
-            KeyConditionExpression=Key('cancellation_token').eq(cancellation_token)
+            IndexName=TOKEN_INDEX_NAME,
+            KeyConditionExpression=Key('tokenValue').eq(token_value)
         )
-        items = response.get('Items', [])
-    except ClientError as e:
-        logger.error(f"Error querying DynamoDB: {e}")
-        _notify_owner_cancellation_failed(None, None, None, error="DynamoDB query error")
-        return _internal_error("Database query error.", cors_headers)
+        for config_item in response.get('Items', []):
+            if config_item.get('SK') == TOKEN_CANCEL_SORT_KEY:
+                return config_item
+        return None
+    except ClientError as exc:
+        logger.error(f"DynamoDB GSI query error: {exc}")
+        return None
 
-    if not items:
-        logger.warning("Cancellation token not found or invalid.")
-        return _unauthorized(cors_headers)
-
-    item = items[0]
-    pk = item['PK']
-    sk = item['SK']
-    secret_id = pk.replace('SECRET#', '')
-    titular_email = item.get("titularAlertContact")
-
+def _get_config_item(partition_key):
+    """
+    Retrieves the CONFIG item for the secret.
+    Args:
+        partition_key (str): The partition key for the secret.
+    Returns:
+        dict or None: CONFIG item if found, else None.
+    """
+    table = dynamodb_resource.Table(DYNAMODB_TABLE_NAME)
     try:
-        table.update_item(
-            Key={"PK": pk, "SK": sk},
-            UpdateExpression="SET processStatus = :cancelled REMOVE cancellation_token, gracePeriodExpiresAt",
-            ConditionExpression="processStatus = :pending",
-            ExpressionAttributeValues={":cancelled": "CANCELLED", ":pending": "ACTIVATION_PENDING"}
-        )
-        logger.info(f"Secret {secret_id} successfully cancelled.")
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            logger.warning(f"Could not cancel secret {secret_id}: invalid state.")
-            _notify_owner_cancellation_failed(titular_email, secret_id, reason="invalid state")
-            return _unauthorized(cors_headers)
-        logger.error(f"Error updating DynamoDB state: {e}")
-        _notify_owner_cancellation_failed(titular_email, secret_id, reason="DynamoDB update error")
-        return _internal_error("Error updating state.", cors_headers)
+        response = table.get_item(Key={'PK': partition_key, 'SK': CONFIG_SORT_KEY})
+        return response.get('Item')
+    except ClientError as exc:
+        logger.error(f"DynamoDB get_item error: {exc}")
+        return None
 
-    schedule_name = f"posterit-e-release-{secret_id}"
+def _cancel_process_transaction(partition_key):
+    """
+    Performs an atomic transaction to cancel the process and delete the token and release token.
+    Args:
+        partition_key (str): The partition key for the secret.
+    Returns:
+        str: 'success', 'conflict', or 'error'
+    """
     try:
-        scheduler_client.delete_schedule(Name=schedule_name)
-        logger.info(f"Scheduled event {schedule_name} deleted.")
-    except ClientError as e:
-        logger.error(f"Error deleting scheduled event: {e}")
-        _notify_owner_cancellation_failed(titular_email, secret_id, reason="schedule deletion failed")
-        return _internal_error("Failed to delete scheduled event. The secret may still be released. Owner has been alerted.", cors_headers)
+        transact_items = [
+            {
+                'Update': {
+                    'TableName': DYNAMODB_TABLE_NAME,
+                    'Key': {'PK': {'S': partition_key}, 'SK': {'S': CONFIG_SORT_KEY}},
+                    'UpdateExpression': 'SET processStatus = :cancelled REMOVE gracePeriodExpiresAt',
+                    'ConditionExpression': 'processStatus = :pending',
+                    'ExpressionAttributeValues': {
+                        ':cancelled': {'S': STATUS_CANCELLED},
+                        ':pending': {'S': STATUS_ACTIVATION_PENDING}
+                    }
+                }
+            },
+            {
+                'Delete': {
+                    'TableName': DYNAMODB_TABLE_NAME,
+                    'Key': {'PK': {'S': partition_key}, 'SK': {'S': TOKEN_CANCEL_SORT_KEY}}
+                }
+            },
+            {
+                'Delete': {
+                    'TableName': DYNAMODB_TABLE_NAME,
+                    'Key': {'PK': {'S': partition_key}, 'SK': {'S': RELEASE_TOKEN_SORT_KEY}}
+                }
+            }
+        ]
+        dynamodb_client.transact_write_items(TransactItems=transact_items)
+        return 'success'
+    except Exception as exc:
+        error_code = None
+        if hasattr(exc, 'response') and isinstance(exc.response, dict):
+            error_code = exc.response.get('Error', {}).get('Code')
+        if error_code == 'ConditionalCheckFailedException':
+            return 'conflict'
+        logger.error(f"DynamoDB transaction error: {exc}")
+        return 'error'
 
-    if titular_email:
-        _send_cancellation_email(titular_email, secret_id)
-    return {
-        "statusCode": 200,
-        "headers": cors_headers,
-        "body": json.dumps({"message": "El proceso de recuperación ha sido cancelado exitosamente."}),
-    }
+def _delete_eventbridge_schedule(secret_id):
+    """
+    Deletes the scheduled EventBridge Scheduler schedule for secret release.
+    Args:
+        secret_id (str): The secret identifier.
+    """
+    schedule_name = f"{EVENTBRIDGE_SCHEDULE_PREFIX}{secret_id}"
+    try:
+        scheduler_client.delete_schedule(Name=schedule_name, GroupName='default')
+    except ClientError as exc:
+        if exc.response['Error']['Code'] != 'ResourceNotFoundException':
+            logger.error(f"Scheduler cleanup error: {exc}")
+    except Exception as exc:
+        logger.error(f"General Scheduler cleanup error: {exc}")
 
-def _bad_request(msg, cors_headers):
-    return {"statusCode": 400, "headers": cors_headers, "body": json.dumps({"message": msg})}
-
-def _unauthorized(cors_headers):
-    return {
-        "statusCode": 401,
-        "headers": cors_headers,
-        "body": json.dumps({
-            "message": "El token de cancelación es inválido, ha expirado o ya fue utilizado."
-        })
-    }
-
-def _internal_error(msg, cors_headers):
-    return {"statusCode": 500, "headers": cors_headers, "body": json.dumps({"message": msg})}
-
-def _send_cancellation_email(to_address, secret_id):
-    ses_client = boto3.client('ses')
-    sender = os.getenv("SENDER_EMAIL_ADDRESS")
-    subject = "Proceso de recuperación cancelado en Posterit-E"
+def _send_cancellation_email(email, secret_id):
+    """
+    Sends a cancellation confirmation email to the titular.
+    Args:
+        email (str): Recipient email address.
+        secret_id (str): The secret identifier.
+    """
+    subject = "Posterit-E: Cancelación de proceso de recuperación"
     body = (
-        f"Hola,\n\nEl proceso de recuperación para tu secreto (ID: {secret_id}) ha sido cancelado exitosamente.\n\n"
-        f"Si no realizaste esta acción, por favor contacta al soporte de Posterit-E.\n\n"
-        f"Saludos,\nEl equipo de Posterit-E"
+        "El proceso de recuperación de tu secreto ha sido cancelado exitosamente.\n\n"
+        "Si no solicitaste esta acción, por favor ignora este mensaje."
     )
     try:
         ses_client.send_email(
-            Source=sender,
-            Destination={"ToAddresses": [to_address]},
+            Source=SES_IDENTITY_ARN,
+            Destination={"ToAddresses": [email]},
             Message={
-                "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body": {"Text": {"Data": body, "Charset": "UTF-8"}}
+                "Subject": {"Data": subject},
+                "Body": {"Text": {"Data": body}}
             }
         )
-        logger.info(f"Cancellation email sent to {to_address}")
-    except ClientError as e:
-        logger.error(f"Error sending cancellation email: {e}")
+    except ClientError as exc:
+        logger.error(f"SES send_email error: {exc}")
 
-def _notify_owner_cancellation_failed(to_address, secret_id, reason=None, error=None):
-    if not to_address:
-        logger.warning("No titular email to notify about cancellation failure.")
-        return
-    ses_client = boto3.client('ses')
-    sender = os.getenv("SENDER_EMAIL_ADDRESS")
-    subject = "No se pudo cancelar el proceso de recuperación en Posterit-E"
-    body = (
-        f"Hola,\n\nNo se pudo cancelar el proceso de recuperación para tu secreto"
-        + (f" (ID: {secret_id})" if secret_id else "") + ".\n\n"
-        "Por favor, contacta al soporte de Posterit-E para obtener ayuda.\n\n"
-        "Si no reconoces esta acción, es importante que informes al soporte lo antes posible.\n\n"
-        "Saludos,\nEl equipo de Posterit-E"
-    )
-    try:
-        ses_client.send_email(
-            Source=sender,
-            Destination={"ToAddresses": [to_address]},
-            Message={
-                "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body": {"Text": {"Data": body, "Charset": "UTF-8"}}
-            }
-        )
-        logger.info(f"Error notification email sent to {to_address}")
-    except ClientError as e:
-        logger.error(f"Error sending error notification email: {e}")
+def _build_response(status_code, message):
+    """
+    Builds an API Gateway-compatible response.
+    Args:
+        status_code (int): HTTP status code.
+        message (str): Message to include in the response body.
+    Returns:
+        dict: API Gateway response.
+    """
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+            "Access-Control-Allow-Methods": "POST,OPTIONS"
+        },
+        "body": json.dumps({"message": message})
+    }

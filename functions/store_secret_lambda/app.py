@@ -2,10 +2,10 @@ import base64
 import json
 import logging
 import os
-import time
 import uuid
 from datetime import datetime, timezone
 import binascii
+from decimal import Decimal
 
 import boto3
 from botocore.exceptions import ClientError
@@ -19,7 +19,7 @@ CONFIG_SK = "CONFIG"
 ENCRYPTED_PAYLOAD_SK = "ENCRYPTED_PAYLOAD"
 
 s3_client = boto3.client('s3')
-dynamodb = boto3.resource('dynamodb')
+ddb_client = boto3.client('dynamodb')
 serializer = TypeSerializer()
 
 logger = logging.getLogger()
@@ -30,79 +30,53 @@ class ValidationException(ValueError):
     pass
 
 def lambda_handler(event, context):
-    """
-    AWS Lambda Function: storeSecretLambda
-
-    Description:
-    This function is the secure entry point for storing a new secret in the Posterit-E system.
-    It receives a pre-encrypted payload from the Titular's client, validates the request structure,
-    and orchestrates the storage of cryptographic artifacts into Amazon S3 and DynamoDB.
-    The design adheres to a Zero-Knowledge model, meaning the server never has access to
-    plaintext secrets or the keys needed for decryption.
-
-    S3 Object:
-    - Stores the main encrypted secret as a single binary object. The object's body
-      consists of the Initialization Vector (IV_Secreto) prepended to the ciphertext
-      of the user's secret.
-
-    DynamoDB Items (Single-Table Design):
-    Three items are stored under the same Partition Key (PK) to group related data:
-    - CONFIG Item (SK: 'CONFIG'): Stores all non-sensitive metadata required to manage
-      the recovery lifecycle, such as the `processStatus`, TTL attributes (`gracePeriodExpiresAt`),
-      and the materials for activation verification (`passwordHashCr`, `saltCr`).
-      Does NOT include cancellation_token, otp, or ttl.
-    - ENCRYPTED_PAYLOAD Item (SK: 'ENCRYPTED_PAYLOAD'): Stores the cryptographic payload
-      necessary for decryption, specifically the encrypted Data Encryption Key (`encryptedDek`)
-      and its corresponding salt (`saltKek`).
-    - TOKEN#CANCEL Item (SK: 'TOKEN#CANCEL'): Stores the cancellation token for the secret.
-      Attributes: tokenValue (UUID v4), tokenType ('CANCELLATION'), ttl (Unix timestamp, e.g. now + 30 days).
-    """
     try:
         logger.info("Request received for storing secret.")
         table_name = os.environ['DYNAMODB_TABLE_NAME']
         bucket_name = os.environ['S3_BUCKET_NAME']
-        logger.info(f"Using DynamoDB table: {table_name} and S3 bucket: {bucket_name}")
 
         body = _parse_and_validate_body(event)
-        logger.info("Request body validated. Required fields present.")
 
         metadata = _generate_server_side_metadata(body['gracePeriodSeconds'])
-        logger.info(f"Generated metadata for secretId: {metadata['secret_id']}")
 
         _upload_secret_to_s3(bucket_name, metadata['s3_object_key'], body['encryptedSecret'])
-        logger.info(f"Encrypted secret uploaded to S3 with key: {metadata['s3_object_key']}")
 
         config_item, payload_item = _prepare_dynamodb_items(body, metadata)
-        config_item_serialized = _serialize_item(config_item)
-        payload_item_serialized = _serialize_item(payload_item)
+        cancellation_token, cancel_token_item = create_cancellation_token_item(metadata['secret_id'])
 
-        cancellation_token, cancel_token_item_serialized = create_cancellation_token_item(metadata['secret_id'])
-        logger.info(f"Prepared DynamoDB items for secretId: {metadata['secret_id']}")
+        config_serialized = _serialize_item(config_item)
+        payload_serialized = _serialize_item(payload_item)
+        token_serialized = _serialize_item(cancel_token_item)
 
-        dynamodb.meta.client.transact_write_items(
+        logger.info(f"Writing transaction for secretId: {metadata['secret_id']}")
+
+        ddb_client.transact_write_items(
             TransactItems=[
-                {'Put': {'TableName': table_name, 'Item': config_item_serialized}},
-                {'Put': {'TableName': table_name, 'Item': payload_item_serialized}},
-                {'Put': {'TableName': table_name, 'Item': cancel_token_item_serialized}}
+                {'Put': {'TableName': table_name, 'Item': config_serialized}},
+                {'Put': {'TableName': table_name, 'Item': payload_serialized}},
+                {'Put': {'TableName': table_name, 'Item': token_serialized}}
             ]
         )
-        logger.info(f"DynamoDB transaction completed for secretId: {metadata['secret_id']}")
-        return _format_response(201, {'message': 'Secret stored successfully.', 'secretId': metadata['secret_id'], 'cancellationToken': cancellation_token})
+
+        logger.info("Transaction completed successfully.")
+        return _format_response(201, {
+            'message': 'Secret stored successfully.',
+            'secretId': metadata['secret_id'],
+            'cancellationToken': cancellation_token
+        })
+
     except ValidationException as e:
         logger.warning(f"Validation error: {str(e)}")
         return _format_response(400, {'error': 'Invalid Request', 'details': str(e)})
     except ClientError as e:
-        logger.error(f"AWS ClientError ({e.response['Error'].get('Code')}): {e}")
-        return _format_response(500, {'error': 'Server Error', 'details': 'A service communication error occurred.'})
+        logger.error(f"AWS ClientError: {e}")
+        return _format_response(500, {'error': 'Server Error', 'details': str(e)})
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
-        return _format_response(500, {'error': 'Internal Server Error', 'details': 'An unexpected error occurred.'})
+        return _format_response(500, {'error': 'Internal Server Error'})
 
 def _parse_and_validate_body(event):
-    """Parses and validates the incoming request body."""
-    raw_body = event.get('body')
-    if raw_body is None:
-        raw_body = '{}'
+    raw_body = event.get('body') or '{}'
     body = json.loads(raw_body)
     if not body:
         raise ValidationException("Request body cannot be empty.")
@@ -112,18 +86,15 @@ def _parse_and_validate_body(event):
     return body
 
 def _generate_server_side_metadata(grace_period_seconds):
-    """Generates server-side metadata like unique IDs and timestamps."""
     secret_id = f"sec-{uuid.uuid4()}"
-    now_epoch = int(time.time())
     return {
         'secret_id': secret_id,
         's3_object_key': secret_id,
         'created_at_iso': datetime.now(timezone.utc).isoformat(),
-        'grace_period_expires_at': now_epoch + int(grace_period_seconds)
+        'gracePeriodSeconds': int(grace_period_seconds)
     }
 
 def _upload_secret_to_s3(bucket_name, key, encrypted_secret_base64):
-    """Decodes the Base64 secret and uploads it to S3."""
     try:
         encrypted_secret_bytes = base64.b64decode(encrypted_secret_base64)
         s3_client.put_object(Bucket=bucket_name, Key=key, Body=encrypted_secret_bytes)
@@ -131,21 +102,21 @@ def _upload_secret_to_s3(bucket_name, key, encrypted_secret_base64):
         raise ValidationException("Field 'encryptedSecret' is not a valid Base64 string.")
 
 def _prepare_dynamodb_items(body, metadata):
-    """Prepares CONFIG and ENCRYPTED_PAYLOAD items for DynamoDB."""
     pk = f"SECRET#{metadata['secret_id']}"
+
     config_item = {
         'PK': pk,
         'SK': CONFIG_SK,
         'secretId': metadata['secret_id'],
         'beneficiaryMfaContact': body['beneficiaryContact'],
         'titularAlertContact': body['titularAlertContact'],
-        'processStatus': 'INITIAL',
-        'gracePeriodSeconds': int(body['gracePeriodSeconds']),
-        'gracePeriodExpiresAt': metadata['grace_period_expires_at'],
+        'processStatus': 'CREATED',
+        'gracePeriodSeconds': metadata['gracePeriodSeconds'],
         'passwordHashCr': body['passwordHashCr'],
         'saltCr': body['saltCr'],
         'createdAt': metadata['created_at_iso']
     }
+
     encrypted_payload_item = {
         'PK': pk,
         'SK': ENCRYPTED_PAYLOAD_SK,
@@ -156,22 +127,31 @@ def _prepare_dynamodb_items(body, metadata):
     return config_item, encrypted_payload_item
 
 def create_cancellation_token_item(secret_id):
-    """Generates, prepares, and serializes the cancellation token item for DynamoDB."""
+    """Returns the token and the item dict (not yet serialized)."""
     pk = f"SECRET#{secret_id}"
     token = str(uuid.uuid4())
-    ttl = int(time.time()) + 30 * 24 * 3600  # 30 days default
     cancel_token_item = {
         'PK': pk,
         'SK': 'TOKEN#CANCEL',
         'tokenValue': token,
-        'tokenType': 'CANCELLATION',
-        'ttl': ttl
+        'tokenType': 'CANCELLATION'
     }
-    return token, _serialize_item(cancel_token_item)
+    return token, cancel_token_item
 
 def _serialize_item(item):
-    """Serializes a Python dict to DynamoDB's expected format."""
-    return {k: serializer.serialize(v) for k, v in item.items()}
+    """
+    Serializes a Python dictionary to DynamoDB format using TypeSerializer.
+    Handles Floats -> Decimal and removes empty Strings.
+    """
+    clean_item = {}
+    for k, v in item.items():
+        if isinstance(v, str) and v == "":
+            continue
+        if isinstance(v, float):
+            clean_item[k] = serializer.serialize(Decimal(str(v)))
+        else:
+            clean_item[k] = serializer.serialize(v)
+    return clean_item
 
 def _format_response(status_code, body):
     return {
@@ -183,3 +163,4 @@ def _format_response(status_code, body):
         },
         'body': json.dumps(body)
     }
+

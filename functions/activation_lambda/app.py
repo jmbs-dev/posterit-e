@@ -2,9 +2,9 @@ import os
 import json
 import boto3
 import hmac
-import uuid
 import datetime
 import logging
+import time
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
@@ -101,36 +101,29 @@ def _update_process_status_and_token(table_name, secret_id, cancellation_token):
     return True
 
 # TODO: Implement a scheduler to send emails/SMS every N configurable time interval.
-def _send_activation_email(to_address, cancellation_token):
-    ses_client = boto3.client('ses')
-    sender = os.getenv("SENDER_EMAIL_ADDRESS")
-    logger.info(f"SES sender: {sender}, SES recipient: {to_address}")
-    if not sender:
-        logger.warning("SENDER_EMAIL_ADDRESS not configured; skipping email send")
-        raise Exception("SENDER_EMAIL_ADDRESS not configured")
-    subject = "Alerta de seguridad: Se ha iniciado un proceso de recuperación para tu secreto en Posterit-E"
-
-    cancel_url = f"{BASE_URL}/cancel?token={cancellation_token}"
+def _send_activation_email(contact, secret_id, cancellation_token):
+    """
+    Send activation notification email to titular in Spanish.
+    """
+    base_url = os.environ.get("BASE_URL", "https://posterite.app")
+    cancel_url = f"{base_url}/cancel?token={cancellation_token}"
+    subject = "Posterit-E: Activación de proceso de recuperación"
     body = (
-        f"Hola,\n\nSe ha iniciado un proceso de recuperación para tu secreto en Posterit-E. "
-        f"Si NO autorizaste este proceso, puedes cancelarlo inmediatamente usando el siguiente enlace seguro:\n\n"
-        f"{cancel_url}\n\n"
-        f"Si reconoces esta acción, puedes ignorar este mensaje.\n\n"
-        f"Saludos,\nEl equipo de Posterit-E"
+        f"Se ha iniciado un proceso de recuperación para tu secreto.\n\n"
+        f"Si deseas cancelar este proceso, haz clic en el siguiente enlace:\n{cancel_url}\n\n"
+        f"Si no solicitaste esta acción, por favor ignora este mensaje."
     )
     try:
         ses_client.send_email(
-            Source=sender,
-            Destination={"ToAddresses": [to_address]},
+            Source=SENDER_EMAIL_ADDRESS,
+            Destination={"ToAddresses": [contact]},
             Message={
-                "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body": {"Text": {"Data": body, "Charset": "UTF-8"}}
+                "Subject": {"Data": subject},
+                "Body": {"Text": {"Data": body}}
             }
         )
-        logger.info(f"Activation email sent to owner for secretId (token hidden)")
     except ClientError as e:
-        logger.error(f"Failed to send activation email to owner: {e}")
-        raise Exception(f"Failed to send activation email: {e}")
+        logger.error(f"SES send_email error: {e}")
 
 def get_salt_for_secret(event, table_name):
     """Handles the GET /activation/{secretId} use case: returns the saltCr for the given secretId."""
@@ -183,12 +176,15 @@ def _revert_process_status(table_name, secret_id):
     try:
         table.update_item(
             Key={"PK": f"SECRET#{secret_id}", "SK": CONFIG_SK},
-            UpdateExpression="SET processStatus = :initial REMOVE cancellation_token",
-            ExpressionAttributeValues={":initial": "INITIAL"}
+            UpdateExpression="SET processStatus = :created REMOVE gracePeriodExpiresAt",
+            ExpressionAttributeValues={":created": "CREATED"}
         )
         logger.info(f"Reverted processStatus to INITIAL for secretId {secret_id}")
     except ClientError as e:
         logger.error(f"Failed to revert processStatus for secretId {secret_id}: {e}")
+
+def _conflict():
+    return _format_response(409, {"message": "The recovery process for this secret is already active."})
 
 def verify_and_activate_process(event, table_name):
     logger.info("POST /activation called.")
@@ -204,47 +200,66 @@ def verify_and_activate_process(event, table_name):
         logger.warning("Missing secretId or clientHash in request body.")
         return _bad_request("Missing secretId or clientHash in request body.")
 
-    item = _get_secret_config(table_name, secret_id, projection="passwordHashCr,processStatus,titularAlertContact,gracePeriodSeconds")
-    if not item or not item.get("passwordHashCr"):
+    # Get CONFIG item
+    config_item = _get_secret_config(table_name, secret_id, projection="passwordHashCr,processStatus,titularAlertContact,gracePeriodSeconds")
+    if not config_item or not config_item.get("passwordHashCr"):
         logger.warning(f"passwordHashCr not found for secretId {secret_id}")
         return _unauthorized()
-    if item.get("processStatus") != "INITIAL":
-        logger.warning(f"processStatus is not INITIAL for secretId {secret_id}")
+    if config_item.get("processStatus") != "CREATED":
+        logger.warning(f"processStatus is not CREATED for secretId {secret_id}")
         return _not_found()
 
-    stored_hash = item["passwordHashCr"]
+    stored_hash = config_item["passwordHashCr"]
     if not hmac.compare_digest(str(client_hash), str(stored_hash)):
         logger.warning(f"Hash mismatch for secretId {secret_id}")
         return _unauthorized()
 
-    cancellation_token = str(uuid.uuid4())
-    if not _update_process_status_and_token(table_name, secret_id, cancellation_token):
-        logger.warning(f"Could not update process status for secretId {secret_id}")
-        return _conflict()
+    # Get cancellation token from TOKEN#CANCEL item
+    table = dynamodb.Table(table_name)
+    token_response = table.get_item(Key={"PK": f"SECRET#{secret_id}", "SK": "TOKEN#CANCEL"}, ProjectionExpression="tokenValue")
+    token_item = token_response.get("Item")
+    if not token_item or not token_item.get("tokenValue"):
+        logger.error(f"Cancellation token not found for secretId {secret_id}")
+        return _internal_error("Data inconsistency: cancellation token missing.")
+    cancellation_token = token_item["tokenValue"]
 
-    schedule_created = False
-    schedule_name = f"posterit-e-release-{secret_id}"
+    # Calculate gracePeriodExpiresAt
+    grace_period_seconds = int(config_item.get("gracePeriodSeconds", 0))
+    grace_period_expires_at = int(time.time()) + grace_period_seconds
+
+    # Atomic update: set processStatus and gracePeriodExpiresAt
     try:
-        titular_email = item.get("titularAlertContact")
-        if titular_email:
-            _send_activation_email(titular_email, cancellation_token)
-        else:
-            logger.warning(f"Owner email not found for the secretId {secret_id}.")
+        table.update_item(
+            Key={"PK": f"SECRET#{secret_id}", "SK": CONFIG_SK},
+            UpdateExpression="SET processStatus = :new_status, gracePeriodExpiresAt = :expiresAt",
+            ConditionExpression="processStatus = :created",
+            ExpressionAttributeValues={
+                ":new_status": "ACTIVATION_PENDING",
+                ":expiresAt": grace_period_expires_at,
+                ":created": "CREATED"
+            }
+        )
+        logger.info(f"Updated processStatus to ACTIVATION_PENDING and set gracePeriodExpiresAt for secretId {secret_id}")
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            logger.warning(f"ConditionalCheckFailedException on update_item for secretId {secret_id}")
+            return _conflict()
+        logger.error(f"DynamoDB error on update_item: {e}")
+        return _internal_error("Activation failed due to database error.")
 
-        grace_period = item.get("gracePeriodSeconds")
-        _schedule_secret_release(secret_id, grace_period)
-        schedule_created = True
+    # Send activation email
+    titular_email = config_item.get("titularAlertContact")
+    if titular_email:
+        _send_activation_email(titular_email, cancellation_token)
+    else:
+        logger.warning(f"Owner email not found for the secretId {secret_id}.")
+
+    # Schedule secret release
+    try:
+        _schedule_secret_release(secret_id, grace_period_seconds)
     except Exception as e:
-        logger.error(f"Activation failed after status update for secretId {secret_id}: {e}")
-        if schedule_created:
-            try:
-                scheduler_client.delete_schedule(Name=schedule_name)
-                logger.info(f"Deleted schedule {schedule_name} after activation failure for secretId {secret_id}")
-            except Exception as del_e:
-                logger.error(f"Failed to delete schedule {schedule_name}: {del_e}")
-        _revert_process_status(table_name, secret_id)
+        logger.error(f"Failed to schedule secret release for secretId {secret_id}: {e}")
         return _internal_error("Activation failed. State reverted.")
 
     logger.info(f"Activation process started for secretId {secret_id}. Owner notified and release scheduled.")
     return _format_response(200, {"message": "Activation process started. The Owner has been notified and the grace period has begun."})
-

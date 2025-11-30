@@ -66,7 +66,7 @@ def test_prepare_dynamodb_items(valid_body_dict):
         'secret_id': 'sec-1',
         's3_object_key': 'sec-1',
         'created_at_iso': '2024-01-01T00:00:00',
-        'grace_period_expires_at': 111,
+        'gracePeriodSeconds': 3600,
     }
     cfg, payload = app._prepare_dynamodb_items(valid_body_dict, metadata)
     assert cfg['PK'] == 'SECRET#sec-1'
@@ -82,7 +82,7 @@ def test_lambda_handler_success(meta_mock, ddb_mock, upload_mock, valid_event, c
         'secret_id': 'sec-1',
         's3_object_key': 'sec-1',
         'created_at_iso': 'X',
-        'grace_period_expires_at': 123
+        'gracePeriodSeconds': 3600
     }
     ddb_mock.meta.client.transact_write_items.return_value = {}
     resp = app.lambda_handler(valid_event, context)
@@ -101,7 +101,7 @@ def test_lambda_handler_validation_error(context):
 @patch('app._generate_server_side_metadata')
 def test_lambda_handler_aws_client_error(meta_mock, ddb_mock, upload_mock, valid_event, context):
     meta_mock.return_value = {
-        'secret_id': 'sec-1', 's3_object_key': 'sec-1', 'created_at_iso': 'X', 'grace_period_expires_at': 1
+        'secret_id': 'sec-1', 's3_object_key': 'sec-1', 'created_at_iso': 'X', 'gracePeriodSeconds': 3600
     }
     ddb_mock.meta.client.transact_write_items.side_effect = ClientError(
         {'Error': {'Code': 'ValidationException', 'Message': 'x'}}, 'TransactWriteItems')
@@ -146,7 +146,7 @@ def test_lambda_handler_missing_one_env(ddb_mock, meta_mock, upload_mock, contex
 @patch('app._generate_server_side_metadata')
 def test_lambda_handler_extra_unknown_fields(meta_mock, ddb_mock, upload_mock, context, valid_body_dict):
     meta_mock.return_value = {
-        'secret_id': 'sec-x', 's3_object_key': 'sec-x', 'created_at_iso': 'X', 'grace_period_expires_at': 5
+        'secret_id': 'sec-x', 's3_object_key': 'sec-x', 'created_at_iso': 'X', 'gracePeriodSeconds': 3600
     }
     ddb_mock.meta.client.transact_write_items.return_value = {}
     body = valid_body_dict.copy()
@@ -164,12 +164,12 @@ def test_upload_secret_to_s3_unexpected_exception(s3_mock):
         app._upload_secret_to_s3('bucket', 'key', base64.b64encode(b'abc').decode())
 
 @patch.dict('os.environ', {'DYNAMODB_TABLE_NAME': 'tbl', 'S3_BUCKET_NAME': 'bucket'})
-@patch('app._upload_secret_to_s3')
-@patch('app.dynamodb')
+@patch('app._upload_secret_to_s3', return_value=None)
 @patch('app._generate_server_side_metadata')
-def test_lambda_handler_empty_encrypted_secret(meta_mock, ddb_mock, upload_mock, context, valid_body_dict):
+@patch('app.dynamodb')
+def test_lambda_handler_empty_encrypted_secret(ddb_mock, meta_mock, upload_mock, context, valid_body_dict):
     meta_mock.return_value = {
-        'secret_id': 'sec-empty', 's3_object_key': 'sec-empty', 'created_at_iso': 'X', 'grace_period_expires_at': 5
+        'secret_id': 'sec-empty', 's3_object_key': 'sec-empty', 'created_at_iso': 'X', 'gracePeriodSeconds': 3600
     }
     ddb_mock.meta.client.transact_write_items.return_value = {}
     body = valid_body_dict.copy()
