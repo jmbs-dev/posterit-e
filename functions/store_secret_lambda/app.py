@@ -2,13 +2,14 @@ import base64
 import json
 import logging
 import os
-import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+import binascii
 
 import boto3
 from botocore.exceptions import ClientError
+from boto3.dynamodb.types import TypeSerializer
 
 REQUIRED_FIELDS = [
     'encryptedSecret', 'encryptedDek', 'saltKek', 'saltCr',
@@ -19,6 +20,7 @@ ENCRYPTED_PAYLOAD_SK = "ENCRYPTED_PAYLOAD"
 
 s3_client = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
+serializer = TypeSerializer()
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -29,50 +31,63 @@ class ValidationException(ValueError):
 
 def lambda_handler(event, context):
     """
-        AWS Lambda Function: storeSecretLambda
+    AWS Lambda Function: storeSecretLambda
 
-        Description:
-        This function serves as the secure entry point for storing a new secret in the Posterit-E system.
-        It receives a pre-encrypted payload from the Titular's client, validates the request structure,
-        and orchestrates the storage of cryptographic artifacts into Amazon S3 and DynamoDB.
-        The design adheres to a Zero-Knowledge model, meaning the server never has access to
-        plaintext secrets or the keys needed for decryption.
+    Description:
+    This function is the secure entry point for storing a new secret in the Posterit-E system.
+    It receives a pre-encrypted payload from the Titular's client, validates the request structure,
+    and orchestrates the storage of cryptographic artifacts into Amazon S3 and DynamoDB.
+    The design adheres to a Zero-Knowledge model, meaning the server never has access to
+    plaintext secrets or the keys needed for decryption.
 
-        S3 Object:
-        - Stores the main encrypted secret as a single binary object. The object's body
-        consists of the Initialization Vector (IV_Secreto) prepended to the ciphertext
-        of the user's secret.
+    S3 Object:
+    - Stores the main encrypted secret as a single binary object. The object's body
+      consists of the Initialization Vector (IV_Secreto) prepended to the ciphertext
+      of the user's secret.
 
-        DynamoDB Items (Single-Table Design):
-        Two items are stored under the same Partition Key (PK) to group related data:
-        - CONFIG Item (SK: 'CONFIG'): Stores all non-sensitive metadata required to manage
-        the recovery lifecycle, such as the `processStatus`, TTL attributes (`gracePeriodExpiresAt`),
-        and the materials for activation verification (`passwordHashCr`, `saltCr`).
-        - ENCRYPTED_PAYLOAD Item (SK: 'ENCRYPTED_PAYLOAD'): Stores the cryptographic payload
-        necessary for decryption, specifically the encrypted Data Encryption Key (`encryptedDek`)
-        and its corresponding salt (`saltKek`).
+    DynamoDB Items (Single-Table Design):
+    Three items are stored under the same Partition Key (PK) to group related data:
+    - CONFIG Item (SK: 'CONFIG'): Stores all non-sensitive metadata required to manage
+      the recovery lifecycle, such as the `processStatus`, TTL attributes (`gracePeriodExpiresAt`),
+      and the materials for activation verification (`passwordHashCr`, `saltCr`).
+      Does NOT include cancellation_token, otp, or ttl.
+    - ENCRYPTED_PAYLOAD Item (SK: 'ENCRYPTED_PAYLOAD'): Stores the cryptographic payload
+      necessary for decryption, specifically the encrypted Data Encryption Key (`encryptedDek`)
+      and its corresponding salt (`saltKek`).
+    - TOKEN#CANCEL Item (SK: 'TOKEN#CANCEL'): Stores the cancellation token for the secret.
+      Attributes: tokenValue (UUID v4), tokenType ('CANCELLATION'), ttl (Unix timestamp, e.g. now + 30 days).
     """
     try:
         logger.info("Request received for storing secret.")
         table_name = os.environ['DYNAMODB_TABLE_NAME']
         bucket_name = os.environ['S3_BUCKET_NAME']
         logger.info(f"Using DynamoDB table: {table_name} and S3 bucket: {bucket_name}")
+
         body = _parse_and_validate_body(event)
         logger.info("Request body validated. Required fields present.")
+
         metadata = _generate_server_side_metadata(body['gracePeriodSeconds'])
         logger.info(f"Generated metadata for secretId: {metadata['secret_id']}")
+
         _upload_secret_to_s3(bucket_name, metadata['s3_object_key'], body['encryptedSecret'])
         logger.info(f"Encrypted secret uploaded to S3 with key: {metadata['s3_object_key']}")
+
         config_item, payload_item = _prepare_dynamodb_items(body, metadata)
+        config_item_serialized = _serialize_item(config_item)
+        payload_item_serialized = _serialize_item(payload_item)
+
+        cancellation_token, cancel_token_item_serialized = create_cancellation_token_item(metadata['secret_id'])
         logger.info(f"Prepared DynamoDB items for secretId: {metadata['secret_id']}")
+
         dynamodb.meta.client.transact_write_items(
             TransactItems=[
-                {'Put': {'TableName': table_name, 'Item': config_item}},
-                {'Put': {'TableName': table_name, 'Item': payload_item}}
+                {'Put': {'TableName': table_name, 'Item': config_item_serialized}},
+                {'Put': {'TableName': table_name, 'Item': payload_item_serialized}},
+                {'Put': {'TableName': table_name, 'Item': cancel_token_item_serialized}}
             ]
         )
         logger.info(f"DynamoDB transaction completed for secretId: {metadata['secret_id']}")
-        return _format_response(201, {'message': 'Secret stored successfully.', 'secretId': metadata['secret_id']})
+        return _format_response(201, {'message': 'Secret stored successfully.', 'secretId': metadata['secret_id'], 'cancellationToken': cancellation_token})
     except ValidationException as e:
         logger.warning(f"Validation error: {str(e)}")
         return _format_response(400, {'error': 'Invalid Request', 'details': str(e)})
@@ -103,7 +118,7 @@ def _generate_server_side_metadata(grace_period_seconds):
     return {
         'secret_id': secret_id,
         's3_object_key': secret_id,
-        'created_at_iso': datetime.utcnow().isoformat(),
+        'created_at_iso': datetime.now(timezone.utc).isoformat(),
         'grace_period_expires_at': now_epoch + int(grace_period_seconds)
     }
 
@@ -112,13 +127,12 @@ def _upload_secret_to_s3(bucket_name, key, encrypted_secret_base64):
     try:
         encrypted_secret_bytes = base64.b64decode(encrypted_secret_base64)
         s3_client.put_object(Bucket=bucket_name, Key=key, Body=encrypted_secret_bytes)
-    except (TypeError, base64.binascii.Error):
+    except (TypeError, binascii.Error):
         raise ValidationException("Field 'encryptedSecret' is not a valid Base64 string.")
 
 def _prepare_dynamodb_items(body, metadata):
-    """Prepares the CONFIG and ENCRYPTED_PAYLOAD items for DynamoDB."""
+    """Prepares CONFIG and ENCRYPTED_PAYLOAD items for DynamoDB."""
     pk = f"SECRET#{metadata['secret_id']}"
-
     config_item = {
         'PK': pk,
         'SK': CONFIG_SK,
@@ -132,7 +146,6 @@ def _prepare_dynamodb_items(body, metadata):
         'saltCr': body['saltCr'],
         'createdAt': metadata['created_at_iso']
     }
-
     encrypted_payload_item = {
         'PK': pk,
         'SK': ENCRYPTED_PAYLOAD_SK,
@@ -140,8 +153,25 @@ def _prepare_dynamodb_items(body, metadata):
         'encryptedDek': body['encryptedDek'],
         'saltKek': body['saltKek']
     }
-
     return config_item, encrypted_payload_item
+
+def create_cancellation_token_item(secret_id):
+    """Generates, prepares, and serializes the cancellation token item for DynamoDB."""
+    pk = f"SECRET#{secret_id}"
+    token = str(uuid.uuid4())
+    ttl = int(time.time()) + 30 * 24 * 3600  # 30 days default
+    cancel_token_item = {
+        'PK': pk,
+        'SK': 'TOKEN#CANCEL',
+        'tokenValue': token,
+        'tokenType': 'CANCELLATION',
+        'ttl': ttl
+    }
+    return token, _serialize_item(cancel_token_item)
+
+def _serialize_item(item):
+    """Serializes a Python dict to DynamoDB's expected format."""
+    return {k: serializer.serialize(v) for k, v in item.items()}
 
 def _format_response(status_code, body):
     return {
